@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bg3dtools"
+version = "0.1.0"
+description = "Scientific computing toolkit for 3D geometry processing, computer vision, and parametric human body modeling"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "scipy",
+    "scikit-learn",
+    "libigl",
+    "Pillow",
+]
+
+[project.optional-dependencies]
+torch = ["torch"]
+mesh = ["trimesh", "plyfile", "triangle"]
+vision = ["opencv-python", "mediapipe"]
+viz = ["open3d"]
+all = [
+    "bg3dtools[torch,mesh,vision,viz]",
+]
+
+[tool.setuptools.packages.find]
+include = ["bg3dtools*", "spectral_match*"]
+
+[tool.setuptools.package-data]
+bg3dtools = ["**/*.npy", "pose_landmarking/resources/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,27 @@
+name: bg3dtools
+
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - numpy
+  - pandas
+  - pip
+  - pyyaml
+  - scikit-learn
+  - scipy
+  - tensorboard
+  - tensorflow=2.4 # for micro_match
+  - tqdm # for micro_match
+  - jax # for micro_match
+  - jaxlib # for micro_match
+  - pip:
+    - matplotlib
+    - networkx
+    - ortools # for micro_match
+    - scikit-image
+    - libigl
+    - pyarrow  # not actually required (yet; pandas will complain)
+    - treelib  # not actually required?
+    - triangle
