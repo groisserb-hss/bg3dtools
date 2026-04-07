@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-**bg3dtools** is a scientific computing toolkit for 3D geometry processing, computer vision, and parametric human body modeling. The primary codebase is in `bg3dtools/`.
+**bg3dtools** is a scientific computing toolkit for 3D geometry processing, computer vision, and parametric human body modeling. The primary codebase is in `bg3dtools/`. A companion package `spectral_match/` provides spectral mesh correspondence via functional maps.
 
 Key domains:
 - Triangle mesh processing and registration
@@ -12,6 +12,7 @@ Key domains:
 - Human pose detection and landmarking (MediaPipe-based)
 - Parametric body models (SMPL, STAR)
 - PyTorch-based neural network utilities
+- Spectral mesh matching and correspondence
 
 ## Commands
 
@@ -20,9 +21,13 @@ Key domains:
 conda env create -f environment.yml
 conda activate bg3dtools
 
+# Install package in dev mode
+pip install -e .
+
 # Run tests (pytest)
-pytest tests/ -v  # Run all tests
-pytest tests/test_file.py -v  # Run specific test file
+pytest tests/ -v
+pytest tests/test_transforms_unified.py -v        # specific file
+pytest tests/test_transforms_unified.py::TestClass::test_method -v  # specific test
 ```
 
 ## Architecture
@@ -39,10 +44,10 @@ bk = infer_backend(arr)  # Returns TorchBackend() for tensors, np for arrays
 result = bk.sum(arr, axis=0, keepdims=True)  # Works for both!
 
 # TorchBackend translates numpy-style calls:
-# - axis -> dim
-# - keepdims -> keepdim
-# - concatenate -> cat
-# - expand_dims -> unsqueeze
+# - axis -> dim, keepdims -> keepdim
+# - concatenate -> cat, expand_dims -> unsqueeze
+# - clip -> clamp, arccos -> acos
+# - Also provides bk.linalg namespace mirroring np.linalg
 ```
 
 **Key files:**
@@ -51,7 +56,8 @@ result = bk.sum(arr, axis=0, keepdims=True)  # Works for both!
 
 ### Batch-Dimension Agnostic Functions
 
-Functions accept arbitrary leading batch dimensions using `[..., N]` notation:
+Functions in `transforms_unified.py` accept arbitrary leading batch dimensions using `[..., N]` notation. The implementation pattern is: flatten batch dims → process → reshape back.
+
 ```python
 twist_to_R(twist)  # [..., 3] -> [..., 3, 3]
 make_aff(twist, trans)  # [..., 3], [..., 3] -> [..., 4, 4]
@@ -59,7 +65,7 @@ make_aff(twist, trans)  # [..., 3], [..., 3] -> [..., 4, 4]
 
 ### Dependencies
 
-**Hard dependencies** (always required): numpy, scipy, libigl, sklearn, PIL/Pillow
+**Hard dependencies** (always required): numpy, scipy, libigl, scikit-learn, Pillow
 
 **Soft dependencies** (lazy-loaded inside functions): trimesh, plyfile, open3d, pytorch, mediapipe, cv2
 
@@ -68,8 +74,9 @@ Soft dependencies use lazy imports inside functions to avoid import errors:
 def read_triangle_mesh(file, process=False):
     import trimesh  # Lazy import
     mesh = trimesh.load_mesh(file, process=process)
-    ...
 ```
+
+Optional dependency groups are defined in `pyproject.toml`: `torch`, `mesh`, `vision`, `viz`, `all`.
 
 ## Module Organization
 
@@ -82,17 +89,38 @@ from bg3dtools.pytorch import TorchBackend, infer_backend  # if torch installed
 
 | Module | Purpose |
 |--------|---------|
-| `mesh/` | Triangle mesh I/O, registration, cleaning, metrics, Laplacian ops |
+| `mesh/` | Triangle mesh I/O, registration, cleaning, metrics, Laplacian/spectral ops |
 | `pointclouds/` | Point cloud fitting (RANSAC), reconstruction, registration |
 | `pytorch/` | Backend abstraction, transforms, mesh ops, neural net modules |
+| `pytorch/detection/` | Object detection training/eval utilities (COCO metrics) |
+| `pytorch/autoencoders/` | VAE implementations (1D, 2D, conditional, categorical) |
 | `pose_landmarking/` | MediaPipe pose detection, joint mapping, segmentation |
 | `image_tools/` | Image packing, filters, video I/O |
+| `iphone/` | iOS depth scanning data I/O (Stray Scanner & Record3D) |
 | `render/` | Colors/colormaps; visualization via `render.trimesh` or `render.o3d` |
 | `utils/` | Timing, algorithms (FPS, PCA), filesystem, stats |
+| `utils/cifs_wrappers/` | Network filesystem I/O with exponential backoff retry |
 | `transforms_unified.py` | Rotation/affine transforms (twist/quaternion/matrix) |
+
+### spectral_match package
+
+Separate package (included in setuptools config) for dense mesh correspondence using functional maps:
+- `spectral_match/pipeline.py` - `FunctionalMapper` orchestrates eigendecomposition → descriptors → functional map solving → product manifold filtering
+- Uses bg3dtools mesh utilities for Laplacian computation and I/O
+- Configured via `SigConfig` and `MatchConfig` namedtuples
 
 ## Code Style
 
 - NumPy-style docstrings with Parameters/Returns/Examples sections
 - Type hints from `typing` module
-- Handle optional dependencies gracefully with try/except imports
+- Handle optional dependencies gracefully with lazy imports inside functions
+
+## Testing Patterns
+
+Tests use these conventions:
+- **Reference implementations**: Inline old/reference code for comparison testing
+- **Batch testing**: Verify functions with arbitrary leading batch dimensions
+- **Known-answer tests**: Apply known transform, recover parameters, assert roundtrip
+- **Cross-backend testing**: Verify numpy and PyTorch produce equivalent results
+- **Test mesh fixtures**: `_icosahedron()`, `_subdivided_icosahedron()`, `_unit_tetrahedron()`
+- **Note**: igl.cotmatrix and igl.massmatrix are broken in igl 2.5.1; custom implementations in `mesh/laplace.py` are used instead

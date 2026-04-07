@@ -658,16 +658,20 @@ def rel_params_to_aff(trunk: list, rel_twist: ArrayLike, rel_trans: ArrayLike, b
     # Build affine transforms for each joint
     rel_affs = make_aff(rel_twist, rel_trans, bk)  # [..., nJ, 4, 4]
 
-    # Initialize abs_affs with rel_affs
+    # Compose transforms along kinematic chain (no in-place ops for autograd)
     if bk is np:
         abs_affs = rel_affs.copy()
+        for jj in range(1, nJ):
+            parent = trunk[jj]
+            abs_affs[..., jj, :, :] = abs_affs[..., parent, :, :] @ rel_affs[..., jj, :, :]
     else:
-        abs_affs = rel_affs.clone()
-
-    # Compose transforms along kinematic chain
-    for jj in range(1, nJ):
-        parent = trunk[jj]
-        abs_affs[..., jj, :, :] = abs_affs[..., parent, :, :] @ rel_affs[..., jj, :, :]
+        # Collect per-joint absolute transforms as a list, then stack
+        abs_list = [rel_affs[..., 0, :, :]]  # root = identity compose
+        for jj in range(1, nJ):
+            parent = trunk[jj]
+            abs_list.append(abs_list[parent] @ rel_affs[..., jj, :, :])
+        import torch
+        abs_affs = torch.stack(abs_list, dim=-3)  # [..., nJ, 4, 4]
 
     return abs_affs
 
