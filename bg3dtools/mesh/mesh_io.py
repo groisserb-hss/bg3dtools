@@ -13,6 +13,7 @@ import numpy as np
 __all__ = [
     "read_triangle_mesh",
     "read_obj",
+    "load_textured_obj",
     "write_colored_plyfile",
     "read_colored_plyfile",
 ]
@@ -100,6 +101,108 @@ def read_obj(
         verts, tc, n, faces, ftc, fn = igl.readOBJ(obj_file)
 
     return verts, tc, n, faces, ftc, fn
+
+
+def load_textured_obj(
+    obj_path: str,
+) -> dict:
+    """
+    Load a textured OBJ mesh (geometry + texture image).
+
+    Reads the OBJ file for geometry and texture coordinates, parses the
+    referenced MTL file to find the texture image path (``map_Kd``), and
+    loads the image.
+
+    Parameters
+    ----------
+    obj_path : str
+        Path to the ``.obj`` file. The MTL and texture image are resolved
+        relative to the OBJ file's directory.
+
+    Returns
+    -------
+    data : dict
+        Dictionary with keys:
+
+        - ``"verts"`` : (nV, 3) ndarray — vertex coordinates
+        - ``"faces"`` : (nF, 3) ndarray — face vertex indices
+        - ``"tc"`` : (nT, 2) ndarray — texture coordinates
+        - ``"ftc"`` : (nF, 3) ndarray — face texture coordinate indices
+        - ``"normals"`` : (nN, 3) ndarray — vertex normals
+        - ``"fn"`` : (nF, 3) ndarray — face normal indices
+        - ``"texture"`` : (H, W, 3) ndarray, uint8 — RGB texture image
+
+    Raises
+    ------
+    FileNotFoundError
+        If the OBJ, MTL, or texture image file cannot be found.
+    ValueError
+        If no ``mtllib`` directive or ``map_Kd`` entry is found.
+
+    Examples
+    --------
+    >>> data = load_textured_obj("scan.000001.obj")
+    >>> data["verts"].shape
+    (250000, 3)
+    >>> data["texture"].shape
+    (4096, 4096, 3)
+    """
+    import os
+
+    if not isfile(obj_path):
+        raise FileNotFoundError(f"OBJ file not found: {obj_path}")
+
+    obj_dir = os.path.dirname(os.path.abspath(obj_path))
+
+    # Parse OBJ for mtllib directive
+    mtl_name = None
+    with open(obj_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("mtllib "):
+                mtl_name = line.split(None, 1)[1]
+                break
+
+    if mtl_name is None:
+        raise ValueError(f"No 'mtllib' directive found in {obj_path}")
+
+    mtl_path = os.path.join(obj_dir, mtl_name)
+    if not isfile(mtl_path):
+        raise FileNotFoundError(f"MTL file not found: {mtl_path}")
+
+    # Parse MTL for map_Kd (texture image)
+    tex_name = None
+    with open(mtl_path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("map_Kd "):
+                tex_name = line.split(None, 1)[1]
+                break
+
+    if tex_name is None:
+        raise ValueError(f"No 'map_Kd' entry found in {mtl_path}")
+
+    tex_path = os.path.join(obj_dir, tex_name)
+    if not isfile(tex_path):
+        raise FileNotFoundError(f"Texture image not found: {tex_path}")
+
+    # Load geometry
+    verts, tc, normals, faces, ftc, fn = read_obj(obj_path)
+
+    # Load texture image
+    from PIL import Image
+
+    texture = np.array(Image.open(tex_path).convert("RGB"))
+
+    return {
+        "verts": verts,
+        "faces": faces,
+        "tc": tc,
+        "ftc": ftc,
+        "normals": normals,
+        "fn": fn,
+        "texture": texture,
+    }
 
 
 # ---------------------------------------------------------------------

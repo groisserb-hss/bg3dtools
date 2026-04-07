@@ -15,6 +15,7 @@ Example
 from .mesh_io import (
     read_triangle_mesh,
     read_obj,
+    load_textured_obj,
     write_colored_plyfile,
     read_colored_plyfile,
 )
@@ -40,6 +41,7 @@ from .utils import (
     sparse_edge_map,
     sample_obj_vtex,
     get_genus,
+    geodesic_submesh,
 )
 
 # Laplacian operators and spectral analysis
@@ -98,6 +100,12 @@ from .generate import (
     pointcloud_to_splatted_mesh,
 )
 
+# Texture sampling
+from .texture import sample_texture_at_points
+
+# Flattening / rasterization
+from .flatten import tangent_plane_project, rasterize_mesh_2d
+
 # Intersections (trimesh is lazy-loaded inside function)
 from .intersections import boolean_slice
 
@@ -105,6 +113,7 @@ __all__ = [
     # I/O
     "read_triangle_mesh",
     "read_obj",
+    "load_textured_obj",
     "write_colored_plyfile",
     "read_colored_plyfile",
     # Utils
@@ -127,6 +136,12 @@ __all__ = [
     "sparse_edge_map",
     "sample_obj_vtex",
     "get_genus",
+    "geodesic_submesh",
+    # Texture sampling
+    "sample_texture_at_points",
+    # Flattening / rasterization
+    "tangent_plane_project",
+    "rasterize_mesh_2d",
     # Laplacian operators and spectral analysis
     "cotangent_weights",
     "lumped_vertex_areas",

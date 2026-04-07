@@ -32,6 +32,7 @@ __all__ = [
     "sparse_edge_map",
     "sample_obj_vtex",
     "get_genus",
+    "geodesic_submesh",
 ]
 
 
@@ -648,3 +649,76 @@ def get_genus(verts, faces):
     import trimesh
     m = trimesh.Trimesh(verts, faces, process=False)
     return int(1 - m.euler_number / 2)
+
+
+def geodesic_submesh(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    center_idx: int,
+    radius: float,
+    method: str = "exact",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Extract the submesh within geodesic distance of a source vertex.
+
+    Computes geodesic distances from ``center_idx``, selects faces whose
+    vertices all lie within ``radius``, and extracts the submesh with
+    remapped indices.
+
+    Parameters
+    ----------
+    verts : (nV, 3) ndarray
+        Vertex coordinates.
+    faces : (nF, 3) ndarray
+        Triangle face indices.
+    center_idx : int
+        Source vertex index.
+    radius : float
+        Geodesic radius in mesh units (metres for metric meshes).
+    method : {"exact", "heat"}, optional
+        Geodesic algorithm. Default is "exact".
+
+    Returns
+    -------
+    sub_verts : (nV', 3) ndarray
+        Vertices of the extracted submesh.
+    sub_faces : (nF', 3) ndarray
+        Faces of the extracted submesh (indices into ``sub_verts``).
+    orig_face_idx : (nF',) ndarray
+        Original face indices corresponding to ``sub_faces``.
+    orig_vert_idx : (nV',) ndarray
+        Original vertex indices corresponding to ``sub_verts``.
+    distances : (nV',) ndarray
+        Geodesic distances of the submesh vertices from ``center_idx``.
+
+    Examples
+    --------
+    >>> sv, sf, fi, vi, d = geodesic_submesh(verts, faces, 1000, 0.08)
+    >>> sv.shape
+    (2500, 3)
+    """
+    from bg3dtools.mesh.metrics import calc_geodesic
+
+    # Geodesic distances from center vertex to all vertices
+    D = calc_geodesic(
+        verts, faces, np.array([center_idx]), exact=(method == "exact")
+    )
+    dist = D[:, 0]  # (nV,)
+
+    # Select faces where all three vertices are within radius
+    face_dists = dist[faces]  # (nF, 3)
+    face_mask = np.all(face_dists <= radius, axis=1)
+    f_idx = np.where(face_mask)[0]
+
+    if f_idx.size == 0:
+        empty_v = np.empty((0, 3), dtype=verts.dtype)
+        empty_f = np.empty((0, 3), dtype=faces.dtype)
+        return empty_v, empty_f, f_idx, np.array([], dtype=np.intp), np.array([])
+
+    sub_verts, sub_faces, orig_face_idx, orig_vert_idx = submesh(
+        verts, faces, f_idx, return_indices=True
+    )
+
+    distances = dist[orig_vert_idx]
+
+    return sub_verts, sub_faces, orig_face_idx, orig_vert_idx, distances
