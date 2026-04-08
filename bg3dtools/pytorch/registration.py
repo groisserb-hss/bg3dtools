@@ -29,7 +29,7 @@ from bg3dtools.utils import row_normalize, ConvergenceScheduler
 from bg3dtools.mesh.utils import face_2_vertex_map, per_vertex_normals, per_vertex_smoothing, sample_E2V, ordered_edges
 from bg3dtools.mesh.laplace import cotangent_weights
 from bg3dtools.pytorch.utils import sparse_to_tensor
-from bg3dtools.pytorch import device
+from bg3dtools.pytorch import default_device as device
 from bg3dtools.pytorch.mesh import per_vertex_normals as torch_per_vertex_normals
 from bg3dtools.render.trimesh import trisurfsm, scatt, draw_geometries, scatts
 

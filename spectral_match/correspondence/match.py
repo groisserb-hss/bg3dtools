@@ -16,7 +16,8 @@ from .functional_maps import zoom_out as zo
 from .product_manifold_filters import product_manifold_filter as pmf
 from .deep_functional_maps.operations import ResidualNet
 from ..tools.mesh_class import Mesh
-from bg3dtools.mesh.utils import bc2sparse, project_to_bccoord, per_vertex_smoothing
+from bg3dtools.mesh.barycentric import bc2sparse, project_to_bccoord
+from bg3dtools.mesh.utils import per_vertex_smoothing
 from scipy.spatial.distance import cdist
 
 def normalise(x, axis):

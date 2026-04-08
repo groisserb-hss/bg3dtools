@@ -16,8 +16,8 @@ from scipy.optimize import linear_sum_assignment
 from bg3dtools.mesh.clean import make_manifold
 from bg3dtools.mesh.modify import resize_to_num_verts
 from bg3dtools.mesh.utils import mesh_volume
-from bg3dtools.mesh.utils import bc2sparse
-from bg3dtools.mesh.utils import surface_sample, per_vertex_normals, per_vertex_smoothing, project_to_bccoord
+from bg3dtools.mesh.barycentric import bc2sparse, project_to_bccoord
+from bg3dtools.mesh.utils import surface_sample, per_vertex_normals, per_vertex_smoothing
 from bg3dtools.mesh.registration import rigid_ICP, nonrigid_ICP
 
 from spectral_match.correspondence.product_manifold_filters import product_manifold_filter as pmf
