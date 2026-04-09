@@ -75,7 +75,7 @@ from .registration import (
     discrete_match,
     surface_match,
     fit_vertices,
-    rigid_ICP,
+    affine_ICP,
 )
 
 # Cleaning
@@ -105,7 +105,7 @@ from .generate import (
 from .texture import sample_texture_at_points
 
 # Flattening / rasterization
-from .flatten import tangent_plane_project, rasterize_mesh_2d
+from .flatten import tangent_plane_project, rasterize_mesh_2d, has_flipped_triangles, mds_flatten
 
 # Intersections (trimesh is lazy-loaded inside function)
 from .intersections import boolean_slice
@@ -143,6 +143,8 @@ __all__ = [
     # Flattening / rasterization
     "tangent_plane_project",
     "rasterize_mesh_2d",
+    "has_flipped_triangles",
+    "mds_flatten",
     # Laplacian operators and spectral analysis
     "cotangent_weights",
     "lumped_vertex_areas",
@@ -166,7 +168,7 @@ __all__ = [
     "discrete_match",
     "surface_match",
     "fit_vertices",
-    "rigid_ICP",
+    "affine_ICP",
     # Clean
     "bounding_box_diagonal",
     "largest_patch",

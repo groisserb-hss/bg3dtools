@@ -104,8 +104,8 @@ def initialisation(src: Mesh, dst: Mesh, k, euclidean_weight=0.0):
     s2 = dst.pointwise_2_vector(dst.s, k)
 
     if euclidean_weight > 2e-8:
-        from bg3dtools.mesh.registration import rigid_ICP
-        aligned_v = rigid_ICP(dst.v, src.f, src.v)[1]
+        from bg3dtools.mesh.registration import affine_ICP
+        aligned_v = affine_ICP(dst.v, src.f, src.v)[1]
         src_idx = np.linspace(0, len(src.v) - 1, s1.shape[1], dtype=int)
         D = cdist(src.v[src_idx], aligned_v)
         dst_idx = np.argmin(D, axis=1)
@@ -153,8 +153,8 @@ def soft_correspondence(src, dst, C, euclidean_weight=0.0):
     P /= np.sum(P, axis=1, keepdims=True)
 
     if euclidean_weight > 2e-8:
-        from bg3dtools.mesh.registration import rigid_ICP
-        aligned_v = rigid_ICP(dst.v, src.f, src.v)[1]
+        from bg3dtools.mesh.registration import affine_ICP
+        aligned_v = affine_ICP(dst.v, src.f, src.v)[1]
         D = cdist(src.v, aligned_v)
         radius = 2 * np.percentile(D, 50)
         E = np.exp(-D / radius)

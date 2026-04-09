@@ -31,6 +31,7 @@ __all__ = [
     "transform_points_forward", "transform_points_inverse",
     "rel_params_to_aff", "aff_to_rel_params",
     "rigid_reg",
+    "affine_reg",
     "spherical_to_cartesian", "cartesian_to_spherical",
 ]
 
@@ -814,6 +815,96 @@ def rigid_reg(
         import torch
         aff = torch.eye(4, dtype=source.dtype, device=source.device)
     aff[:3, :3] = R
+    aff[:3, 3] = t
+
+    if return_aligned:
+        aligned = transform_points_forward(aff, source, bk=bk)
+        return aff, aligned
+    return aff
+
+
+def affine_reg(
+    source: ArrayLike,
+    dest: ArrayLike,
+    reg: float = 1e-6,
+    return_aligned: bool = False,
+    bk=None,
+) -> Union[ArrayLike, tuple]:
+    """
+    Affine registration (least-squares, 9-DOF + translation).
+
+    Finds the affine transform (per-axis scale, shear, rotation, translation)
+    that best maps *source* onto *dest* in the least-squares sense via
+    normal-equation solve.
+
+    Parameters
+    ----------
+    source : (N, 3) array
+        Source points to transform.
+    dest : (N, 3) array
+        Destination points to align to.
+    reg : float, optional
+        Tikhonov regularization strength. Default is 1e-6.
+    return_aligned : bool, optional
+        If True, also return the aligned source points. Default is False.
+    bk : optional
+        Backend (numpy or TorchBackend). Inferred from *source* if None.
+
+    Returns
+    -------
+    aff : (4, 4) array
+        Affine transformation matrix.
+    aligned : (N, 3) array, optional
+        Aligned source points. Only returned when *return_aligned* is True.
+    """
+    if bk is None:
+        bk = infer_backend(source)
+
+    assert source.shape == dest.shape
+
+    # Filter out rows containing NaN / inf in either set
+    valid = bk.all(bk.isfinite(source), axis=1) & bk.all(bk.isfinite(dest), axis=1)
+    src = source[valid]
+    dst = dest[valid]
+
+    assert len(src) >= 4, "Need at least 4 valid point pairs"
+
+    # Shortcut: if points are already coincident, return identity
+    if bk.all(bk.abs(src - dst) < EPS):
+        if bk is np:
+            aff = np.eye(4)
+        else:
+            import torch
+            aff = torch.eye(4, dtype=source.dtype, device=source.device)
+        if return_aligned:
+            return aff, bk.copy(source)
+        return aff
+
+    # 1. Compute centroids and centre the clouds
+    mu_src = bk.mean(src, axis=0)
+    mu_dst = bk.mean(dst, axis=0)
+    src_c = src - mu_src
+    dst_c = dst - mu_dst
+
+    # 2. Solve normal equations: (src_c.T @ src_c + reg*I) @ A.T = src_c.T @ dst_c
+    if bk is np:
+        lhs = src_c.T @ src_c + reg * np.eye(3)
+    else:
+        import torch
+        lhs = src_c.T @ src_c + reg * torch.eye(3, dtype=source.dtype, device=source.device)
+    rhs = src_c.T @ dst_c
+    A = bk.linalg.solve(lhs, rhs).T  # (3, 3)
+
+    # 3. Translation  t = mu_dst - A @ mu_src
+    t = mu_dst - A @ mu_src
+
+    # 4. Assemble 4x4 affine
+    if bk is np:
+        aff = np.eye(4)
+    else:
+        import torch
+        aff = torch.eye(4, dtype=source.dtype, device=source.device)
+    aff[:3, :3] = A
     aff[:3, 3] = t
 
     if return_aligned:

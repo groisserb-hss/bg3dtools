@@ -24,7 +24,7 @@ from bg3dtools.mesh.laplace import cotangent_weights
 from bg3dtools.mesh.barycentric import points_to_barycentric, bc2sparse
 from bg3dtools.mesh.distortion import normal_fold_score
 from bg3dtools.utils import row_normalize, ConvergenceScheduler
-from bg3dtools.transforms_unified import rigid_reg, transform_points_forward
+from bg3dtools.transforms_unified import rigid_reg, affine_reg, transform_points_forward
 from scipy.sparse import csr_matrix
 
 __all__ = [
@@ -32,7 +32,7 @@ __all__ = [
     "discrete_match",
     "surface_match",
     "fit_vertices",
-    "rigid_ICP",
+    "affine_ICP",
 ]
 
 EPS = 0.0000001
@@ -464,20 +464,21 @@ def fit_vertices(
     return fittedV
 
 
-def rigid_ICP(
+def affine_ICP(
     points: np.ndarray,
     faces: np.ndarray,
     verts: np.ndarray,
     init_tform: Optional[np.ndarray] = None,
     pthresh: float = 95,
     max_iters: int = 100,
-    scale: bool = False
+    scale: bool = False,
+    affine: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Rigid ICP registration of a point cloud to a mesh.
+    ICP registration of a point cloud to a mesh.
 
-    Iteratively finds the rigid transformation (rotation + translation,
-    optionally scale) that aligns the point cloud to the mesh surface.
+    Iteratively finds the transformation (rigid, similarity, or affine)
+    that aligns the point cloud to the mesh surface.
 
     Parameters
     ----------
@@ -488,19 +489,23 @@ def rigid_ICP(
     verts : (nV, 3) ndarray
         Mesh vertex positions.
     init_tform : (4, 4) ndarray, optional
-        Initial rigid transformation. Default is identity.
+        Initial transformation. Default is identity.
     pthresh : float, optional
         Final percentile threshold for outlier rejection (0-100).
         Threshold anneals from 100 to pthresh. Default is 95.
     max_iters : int, optional
         Maximum iterations. Default is 100.
     scale : bool, optional
-        If True, allow uniform scaling. Default is False.
+        If True, allow uniform scaling (7-DOF similarity). Default is False.
+        Ignored when *affine* is True.
+    affine : bool, optional
+        If True, solve full 9-DOF affine (per-axis scale + shear).
+        Default is False.
 
     Returns
     -------
     tform : (4, 4) ndarray
-        Optimal rigid transformation matrix.
+        Optimal transformation matrix.
     regpoints : (N, 3) ndarray
         Transformed point cloud.
 
@@ -509,7 +514,7 @@ def rigid_ICP(
     Uses adaptive outlier rejection that starts permissive and tightens
     to pthresh as iterations progress.
     """
-    log = logging.getLogger('rigid_ICP')
+    log = logging.getLogger('affine_ICP')
     assert 0 < pthresh < 100
 
     # initialize transform
@@ -533,8 +538,11 @@ def rigid_ICP(
         cloud_match = points[idx]
         err = np.sqrt(np.mean(d2[idx]))
 
-        # find rigid registration to close points
-        opt_tform = rigid_reg(cloud_match, surf_match, scale=scale)
+        # find registration to close points
+        if affine:
+            opt_tform = affine_reg(cloud_match, surf_match)
+        else:
+            opt_tform = rigid_reg(cloud_match, surf_match, scale=scale)
         regpoints = transform_points_forward(opt_tform, points)
 
         # update scheduler

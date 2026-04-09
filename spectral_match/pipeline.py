@@ -18,7 +18,7 @@ from bg3dtools.mesh.modify import resize_to_num_verts
 from bg3dtools.mesh.utils import mesh_volume
 from bg3dtools.mesh.barycentric import bc2sparse, project_to_bccoord
 from bg3dtools.mesh.utils import surface_sample, per_vertex_normals, per_vertex_smoothing
-from bg3dtools.mesh.registration import rigid_ICP, nonrigid_ICP
+from bg3dtools.mesh.registration import affine_ICP, nonrigid_ICP
 
 from spectral_match.correspondence.product_manifold_filters import product_manifold_filter as pmf
 from spectral_match.tools.mesh_class import Mesh
@@ -41,14 +41,19 @@ def pmf_match(src_hr, dst_orig, config, src=None, dst=None):
 
     Note: all points on dst (bone) are matched to a point on src (template), but not vice versa
     """
+    from time import time
+    _log = logging.getLogger(__name__)
+    t0 = time()
 
     assert len(dst.v) <= len(src.v), 'destination mesh must have fewer vertices than source mesh'
     # initialize with euclidean matching
-    aligned_v = rigid_ICP(dst.v, src.f, src.v, scale=True)[1]
+    aligned_v = affine_ICP(dst.v, src.f, src.v, scale=True)[1]
     map = surface_sample(src.v, src.f, N=30000)[0]
     p = map @ src.v
     n = map @ per_vertex_normals(src.v, src.f)
     aligned_v = nonrigid_ICP(p, dst.f, aligned_v, pt_normals=n, model_weight=3.)[0]
+    t1 = time()
+    _log.info('pmf_match: ICP init %.2fs (src %d, dst %d verts)', t1 - t0, len(src.v), len(dst.v))
 
     D = cdist(aligned_v, src.v)
     j = np.argmin(D, axis=1)  # index into dst for each vertex in src
@@ -56,7 +61,9 @@ def pmf_match(src_hr, dst_orig, config, src=None, dst=None):
 
     assign = lambda x: linear_sum_assignment(x, maximize=True)
     i, j = pmf.product_manifold_filter_correspondence(assign, dst.g, src.g, i, j, config)
+    t2 = time()
     dg = np.abs(src.g[j][:, j] - dst.g[i][:, i]).mean()
+    _log.info('pmf_match: PMF optimization %.2fs, dg=%.4f', t2 - t1, dg)
     query_on_template = src.v[j]
 
     for _ in range(10):
@@ -67,10 +74,8 @@ def pmf_match(src_hr, dst_orig, config, src=None, dst=None):
     up_map = project_to_bccoord(dst.v, dst.f, dst_orig.v, return_map=True)[2]
     query_on_template = up_map @ query_on_template
 
-    # c = vcolor(dst_orig.v)
-    # double_plot(dst_orig, Mesh(query_on_template, dst_orig.f), cmap1=c, cmap2=c)
-
     template2query, query2template = TemplateMapper.cartesian_mapping(src_hr.v, src_hr.f, query_on_template, dst_orig.f)
+    _log.info('pmf_match: total %.2fs', time() - t0)
 
     return dg, query2template, template2query
 
@@ -98,20 +103,25 @@ class FunctionalMapper:
                  weight_file=None,
                  sig_config=None,
                  match_config=None,
-                 extra_sig_fun=None):
+                 extra_sig_fun=None,
+                 compute_spectral=False):
 
         self.logger = logging.getLogger('FunctionalMapper')
 
         self.target_size = target_size
         self.sig_config = default_sig_config if sig_config is None else sig_config
         self.match_config = default_match_config if match_config is None else match_config
-        self.num_eigenvectors = num_eigs
         self.num_layers = num_layers
-        self.num_signatures = self.sig_config.num_signatures
-
-        # class that computes signature functions
-        self.describer = DescriptorClass(self.sig_config)
         self.extra_sig_fun = extra_sig_fun
+
+        if compute_spectral:
+            self.num_eigenvectors = num_eigs
+            self.num_signatures = self.sig_config.num_signatures
+            self.describer = DescriptorClass(self.sig_config)
+        else:
+            self.num_eigenvectors = 0
+            self.num_signatures = 0
+            self.describer = None
 
         self.resnet = None
         if weight_file is not None:
@@ -122,28 +132,37 @@ class FunctionalMapper:
         self.resnet.load_weights(weight_file).expect_partial()
 
     def preprocess_mesh(self, verts: np.ndarray, faces: np.ndarray, target_size=None) -> Mesh:
+        from time import time
 
-        self.logger.debug('Preprocessing query mesh; making manifold')
+        t0 = time()
+        self.logger.info('preprocess_mesh: input %d verts %d faces', len(verts), len(faces))
         verts, faces = make_manifold(verts, faces)
+        t1 = time()
+        self.logger.info('  make_manifold: %.2fs → %d verts %d faces', t1 - t0, len(verts), len(faces))
 
         # decimate to args.target_size
         N = self.target_size if target_size is None else target_size
-        self.logger.debug('resize to %d vertices' % N)
         verts, faces = resize_to_num_verts(verts, faces, N)
+        t2 = time()
+        self.logger.info('  resize_to_%d: %.2fs → %d verts %d faces', N, t2 - t1, len(verts), len(faces))
 
         mesh = Mesh(verts, faces, num_eigenvectors=self.num_eigenvectors)
         assert np.size(mesh.g) > 0, 'Failed to compute geodesic distances'
-        self.logger.debug('Computed geodesic distances')
+        t3 = time()
+        self.logger.info('  geodesic distances: %.2fs', t3 - t2)
 
-        # compute eigenvalues and eigenvectors
-        assert all([np.size(e) > 0 for e in mesh.eigen]), 'Failed to compute eigenvectors'
-        self.logger.debug('Computed eigenvectors')
+        if self.num_eigenvectors > 0:
+            # compute eigenvalues and eigenvectors
+            assert all([np.size(e) > 0 for e in mesh.eigen]), 'Failed to compute eigenvectors'
+            t4 = time()
+            self.logger.info('  eigen decomposition: %.2fs', t4 - t3)
 
-        # compute signature functions
         if self.describer is not None:
             mesh.s = self.describer(mesh)
-            logging.debug('Computed %d signature functions' % mesh.s.shape[1])
+            t5 = time()
+            self.logger.info('  descriptors: %.2fs (%d features)', t5 - (t4 if self.num_eigenvectors > 0 else t3), mesh.s.shape[1])
 
+        self.logger.info('  preprocess_mesh total: %.2fs', time() - t0)
         return mesh
 
     def mesh_correspondence(self, src: Mesh, dst: Mesh, initial_dimensions=-1, use_deep_maps=True):
