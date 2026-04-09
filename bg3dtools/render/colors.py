@@ -112,6 +112,30 @@ def get_heatmap_color(
     raise ValueError("out must be 'float' or 'uint8'")
 
 
+def xyz_to_rgb(v):
+    """Map vertex positions to RGB via per-axis normalization.
+
+    Each axis is independently scaled to [0, 1] -> (R, G, B).
+    Provides a smooth, spatially-varying texture for correspondence QC.
+
+    Parameters
+    ----------
+    v : (N, 3) ndarray
+        Vertex positions.
+
+    Returns
+    -------
+    rgb : (N, 3) ndarray
+        Per-vertex RGB in [0, 1].
+    """
+    v = np.asarray(v, dtype=np.float64)
+    lo = v.min(axis=0)
+    hi = v.max(axis=0)
+    span = hi - lo
+    span[span == 0] = 1.0
+    return (v - lo) / span
+
+
 def _matlab_like_colormap(name: str, n: int) -> np.ndarray:
     """
     Generate MATLAB-style colormap lookup table.

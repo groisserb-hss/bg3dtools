@@ -21,9 +21,14 @@ colors
 """
 
 # Re-export from colors module for backward compatibility
-from .colors import default_colors, get_heatmap_color
+from .colors import default_colors, get_heatmap_color, xyz_to_rgb
+from .o3d import render_mesh_to_image, overhead_camera, anterior_camera
 
 __all__ = [
     "default_colors",
     "get_heatmap_color",
+    "xyz_to_rgb",
+    "render_mesh_to_image",
+    "overhead_camera",
+    "anterior_camera",
 ]

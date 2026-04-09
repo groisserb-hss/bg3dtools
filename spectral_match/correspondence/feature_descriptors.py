@@ -6,11 +6,16 @@ and Gaussian curvature descriptors from Laplacian eigendecompositions.
 """
 
 # Derived from pyFM by Robin Magnet (MIT License) — see /THIRD_PARTY_NOTICES.txt
+import logging
+from time import time
+
 import numpy as np
 from scipy.spatial.distance import cdist
 
 from ..tools import geometric_utilities as util
 from bg3dtools.mesh.laplace import gaussian_curvature, laplacian_smoothing_batch
+
+log = logging.getLogger(__name__)
 
 # from shot_descriptor import calculate_SHOT_descriptors
 
@@ -85,16 +90,33 @@ class DescriptorClass:
 
     def __call__(self, mesh):
         evals, evecs = mesh.eigen
-        assert np.min(evals[0 < evals]) + 1e-2 > self.emin, "eigenvalues below minimum"
-        assert np.max(evals) < self.emax, "eigenvalues exceed maximum"
+        emin_actual = np.min(evals[0 < evals])
+        emax_actual = np.max(evals)
+        log.info('eigenvalues: n=%d, min_pos=%.4f, max=%.1f, '
+                 'range=[%.4f, %.4f] (config emin=%.4f emax=%.1f), '
+                 'mesh %d verts %d faces',
+                 len(evals), emin_actual, emax_actual,
+                 evals[0], evals[-1], self.emin, self.emax,
+                 len(mesh.v), len(mesh.f))
+        assert emin_actual + 1e-2 > self.emin, \
+            f"eigenvalues below minimum: min_pos={emin_actual:.6f}, emin={self.emin}"
+        assert emax_actual < self.emax, \
+            f"eigenvalues exceed maximum: max={emax_actual:.1f}, emax={self.emax}"
+
+        t0 = time()
         kap = gaussian_descriptor(mesh, self.num_gaussian)
+        t1 = time()
         wks = wave_kernel_signature(
             evecs[:, 1:], evals[1:], self.eps, self.sigma
         )
+        t2 = time()
         hks = heat_kernel_signature(evecs[:, 1:], evals[1:], self.T)
+        t3 = time()
         sigs = np.concatenate([wks, hks, kap], axis=-1)
         sigs /= (
             np.sqrt(np.sum(mesh.mass @ sigs ** 2, axis=0, keepdims=True))
             + 1e-6
         )
+        log.info('descriptors: gaussian=%.2fs, wks=%.2fs, hks=%.2fs',
+                 t1 - t0, t2 - t1, t3 - t2)
         return sigs

@@ -338,6 +338,70 @@ def trisurfsm(
     return mesh
 
 
+def overhead_camera(v):
+    """Camera looking down S-axis (superior -> inferior).
+
+    Returns (lookat, eye, up) for use with render_mesh_to_image.
+    """
+    center = v.mean(axis=0)
+    extent = v.ptp(axis=0)
+    eye = center + np.array([0, 0, extent[2] * 2])
+    up = np.array([0, 1, 0])
+    return center, eye, up
+
+
+def anterior_camera(v):
+    """Camera looking from anterior toward posterior (A-axis).
+
+    Returns (lookat, eye, up) for use with render_mesh_to_image.
+    """
+    center = v.mean(axis=0)
+    extent = v.ptp(axis=0)
+    eye = center + np.array([0, extent[1] * 2, 0])
+    up = np.array([0, 0, 1])
+    return center, eye, up
+
+
+def render_mesh_to_image(geom, lookat, eye, up, width=400, height=400, fov=45.0):
+    """Render an Open3D geometry to a numpy RGB uint8 image.
+
+    Tries OffscreenRenderer (headless) first, falls back to legacy Visualizer.
+    """
+    try:
+        return _render_offscreen(geom, lookat, eye, up, width, height, fov)
+    except Exception:
+        return _render_legacy(geom, lookat, eye, up, width, height)
+
+
+def _render_offscreen(geom, lookat, eye, up, width, height, fov):
+    import open3d.visualization.rendering as rendering
+    renderer = rendering.OffscreenRenderer(width, height)
+    renderer.scene.set_background(np.array([1, 1, 1, 1], dtype=np.float32))
+    mat = rendering.MaterialRecord()
+    mat.shader = "defaultLit"
+    renderer.scene.add_geometry("mesh", geom, mat)
+    renderer.setup_camera(fov, lookat, eye, up)
+    return np.asarray(renderer.render_to_image())
+
+
+def _render_legacy(geom, lookat, eye, up, width, height):
+    import sys
+    visible = sys.platform == 'darwin'
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(width=width, height=height, visible=visible)
+    vis.get_render_option().background_color = np.array([1, 1, 1])
+    vis.add_geometry(geom)
+    ctr = vis.get_view_control()
+    ctr.set_lookat(lookat)
+    ctr.set_front(eye - lookat)
+    ctr.set_up(up)
+    vis.poll_events()
+    vis.update_renderer()
+    img = np.asarray(vis.capture_screen_float_buffer(do_render=True))
+    vis.destroy_window()
+    return (np.clip(img, 0, 1) * 255).astype(np.uint8)
+
+
 def mesh_to_wireframe(
     vertices: np.ndarray,
     faces: np.ndarray,

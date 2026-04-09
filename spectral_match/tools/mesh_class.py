@@ -8,7 +8,9 @@ filtering operations for functional map pipelines.
 
 # Derived from pyFM by Robin Magnet (MIT License) — see /THIRD_PARTY_NOTICES.txt
 import json
+import logging
 import os
+from time import time
 
 import igl
 import numpy as np
@@ -18,6 +20,8 @@ from . import geometric_utilities as util
 from bg3dtools.mesh.mesh_io import read_triangle_mesh
 from bg3dtools.mesh.laplace import laplace_eigen_decomposition, gaussian_curvature
 from bg3dtools.mesh.laplace import cotangent_weights, fem_mass_matrix
+
+log = logging.getLogger(__name__)
 
 """ ================================================================================= """
 """                         Mesh Class Definition                                     """
@@ -204,8 +208,9 @@ class Mesh:
     @property
     def g(self) -> np.ndarray:
         if self.__g.size == 0:
+            t0 = time()
             self.__g = util.geodesic_matrix(self.v, self.f)
-            # self.__g = util.biharmonicMatrix(self.v, self.f, dim=500)
+            log.info('geodesic matrix: %d verts, %.2fs', len(self.__v), time() - t0)
         return self.__g
 
     # Geodesic Matrix
@@ -247,9 +252,12 @@ class Mesh:
     @property
     def eigen(self) -> list[np.ndarray]:
         if any([e.size == 0 for e in self.__eigen]):
+            t0 = time()
             self.__eigen = laplace_eigen_decomposition(
                 self.l, self.mass, self.num_eigenvectors
             )
+            log.info('eigen decomposition: %d verts, k=%d, %.2fs',
+                     len(self.__v), self.num_eigenvectors, time() - t0)
         return self.__eigen
 
     @eigen.setter

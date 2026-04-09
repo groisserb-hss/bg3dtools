@@ -12,6 +12,8 @@ from typing import Optional, Tuple
 __all__ = [
     "tangent_plane_project",
     "rasterize_mesh_2d",
+    "has_flipped_triangles",
+    "mds_flatten",
 ]
 
 
@@ -78,6 +80,52 @@ def tangent_plane_project(
     return xy
 
 
+def _point_in_triangle_scan(
+    verts_2d: np.ndarray,
+    faces: np.ndarray,
+    px: np.ndarray,
+    py: np.ndarray,
+) -> np.ndarray:
+    """Brute-force point-in-triangle test for all pixels against all faces.
+
+    Slower than TrapezoidMapTriFinder but works on degenerate triangulations.
+    Returns an array of face indices per pixel (-1 if outside all triangles).
+    """
+    n_pts = len(px)
+    tri_idx = np.full(n_pts, -1, dtype=np.int32)
+
+    for fi in range(faces.shape[0]):
+        v0 = verts_2d[faces[fi, 0]]
+        v1 = verts_2d[faces[fi, 1]]
+        v2 = verts_2d[faces[fi, 2]]
+
+        # Skip degenerate triangles
+        area2 = (v1[0] - v0[0]) * (v2[1] - v0[1]) - (v1[1] - v0[1]) * (v2[0] - v0[0])
+        if abs(area2) < 1e-20:
+            continue
+
+        # Vectorized barycentric test for all unassigned pixels
+        mask = tri_idx < 0
+        qx, qy = px[mask], py[mask]
+
+        d00 = v1 - v0
+        d01 = v2 - v0
+        d02x = qx - v0[0]
+        d02y = qy - v0[1]
+
+        inv = 1.0 / area2
+        u = (d01[1] * d02x - d01[0] * d02y) * inv
+        v = (d00[0] * d02y - d00[1] * d02x) * inv
+
+        inside = (u >= -1e-8) & (v >= -1e-8) & (u + v <= 1.0 + 1e-8)
+        idx_in_mask = np.where(inside)[0]
+        if len(idx_in_mask) > 0:
+            orig_idx = np.where(mask)[0][idx_in_mask]
+            tri_idx[orig_idx] = fi
+
+    return tri_idx
+
+
 def rasterize_mesh_2d(
     verts_2d: np.ndarray,
     faces: np.ndarray,
@@ -134,10 +182,15 @@ def rasterize_mesh_2d(
     px = gx.ravel()
     py = gy.ravel()
 
-    # Use matplotlib's TrapezoidMapTriFinder for O(log N) point location
-    tri = Triangulation(verts_2d[:, 0], verts_2d[:, 1], faces)
-    finder = TrapezoidMapTriFinder(tri)
-    tri_idx = finder(px, py)  # (grid_size^2,) int, -1 if outside
+    # Use matplotlib's TrapezoidMapTriFinder for O(log N) point location.
+    # Falls back to per-triangle scan if TrapezoidMapTriFinder rejects the
+    # triangulation (degenerate triangles from MDS flattening).
+    try:
+        tri = Triangulation(verts_2d[:, 0], verts_2d[:, 1], faces)
+        finder = TrapezoidMapTriFinder(tri)
+        tri_idx = finder(px, py)  # (grid_size^2,) int, -1 if outside
+    except RuntimeError:
+        tri_idx = _point_in_triangle_scan(verts_2d, faces, px, py)
 
     face_map = tri_idx.reshape(grid_size, grid_size).astype(np.int32)
     bary_map = np.zeros((grid_size, grid_size, 3), dtype=np.float64)
@@ -176,3 +229,119 @@ def rasterize_mesh_2d(
         bary_map = bary_flat.reshape(grid_size, grid_size, 3)
 
     return face_map, bary_map
+
+
+def has_flipped_triangles(verts_2d: np.ndarray, faces: np.ndarray) -> bool:
+    """Check whether a 2D triangulation has any flipped (overlapping) triangles.
+
+    In a valid planar triangulation from a surface projection, all triangles
+    should have consistent winding (all positive or all negative signed area).
+    Mixed signs indicate the projection has produced overlapping geometry,
+    typically from high surface curvature.
+
+    Parameters
+    ----------
+    verts_2d : (N, 2) ndarray
+        2D vertex positions.
+    faces : (F, 3) ndarray
+        Triangle vertex indices.
+
+    Returns
+    -------
+    bool
+        True if any triangles have opposite winding from the majority.
+    """
+    v0 = verts_2d[faces[:, 0]]
+    v1 = verts_2d[faces[:, 1]]
+    v2 = verts_2d[faces[:, 2]]
+    # Signed area (2x) via cross product of edge vectors
+    cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) - \
+            (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0])
+    n_positive = np.sum(cross > 0)
+    n_negative = np.sum(cross < 0)
+    return n_positive > 0 and n_negative > 0
+
+
+def mds_flatten(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    center_idx: int,
+    up_direction: np.ndarray,
+) -> np.ndarray:
+    """Flatten a mesh patch to 2D using classical MDS on geodesic distances.
+
+    Computes all-pairs geodesic distances on the submesh, then applies
+    classical (Torgerson) MDS to embed the vertices in 2D while preserving
+    geodesic distances as well as possible. Unlike tangent-plane projection,
+    MDS unrolls curvature rather than projecting through it, so it won't
+    produce overlapping triangles on disk-topology patches.
+
+    Parameters
+    ----------
+    verts : (N, 3) ndarray
+        Submesh vertex coordinates.
+    faces : (F, 3) ndarray
+        Submesh triangle indices.
+    center_idx : int
+        Index of the center vertex in the submesh (will be placed at origin).
+    up_direction : (3,) ndarray
+        Cranial direction in 3D, used to orient the 2D embedding so that
+        the most "upward" vertex (in 3D) maps to +y in 2D.
+
+    Returns
+    -------
+    coords_2d : (N, 2) ndarray
+        Flattened 2D coordinates, centered on ``center_idx`` with
+        consistent orientation.
+    """
+    from .metrics import calc_geodesic
+
+    verts = np.asarray(verts, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int32)
+    up_direction = np.asarray(up_direction, dtype=np.float64)
+    n = verts.shape[0]
+
+    # 1. All-pairs geodesic distance matrix (heat method avoids segfaults
+    #    in igl.exact_geodesic when called ~N times on small submeshes)
+    D = calc_geodesic(verts, faces, exact=False)  # (N, N)
+
+    # 2. Symmetrize and zero diagonal
+    D = (D + D.T) / 2
+    np.fill_diagonal(D, 0.0)
+
+    # 3. Classical MDS: B = -0.5 * H @ D^2 @ H
+    D_sq = D ** 2
+    H = np.eye(n) - np.ones((n, n)) / n
+    B = -0.5 * H @ D_sq @ H
+
+    # 4. Eigendecompose, take top 2 eigenvectors
+    eigenvalues, eigenvectors = np.linalg.eigh(B)
+    # eigh returns ascending order; take the two largest
+    idx = np.argsort(eigenvalues)[::-1][:2]
+    vals = np.maximum(eigenvalues[idx], 0.0)  # clamp numerical noise
+    coords_2d = eigenvectors[:, idx] * np.sqrt(vals)[None, :]  # (N, 2)
+
+    # 5. Center on center_idx
+    coords_2d -= coords_2d[center_idx]
+
+    # 6. Orient: rotate so the most "upward" vertex (in 3D) maps to +y
+    rel_3d = verts - verts[center_idx]
+    up_proj = rel_3d @ up_direction
+    up_vertex = np.argmax(up_proj)
+
+    target_2d = coords_2d[up_vertex]
+    angle = np.arctan2(target_2d[0], target_2d[1])  # angle from +y axis
+    cos_a, sin_a = np.cos(-angle), np.sin(-angle)
+    R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    coords_2d = coords_2d @ R.T
+
+    # 7. Fix handedness: flip x if mean signed area is negative
+    v0 = coords_2d[faces[:, 0]]
+    v1 = coords_2d[faces[:, 1]]
+    v2 = coords_2d[faces[:, 2]]
+    cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) - \
+            (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0])
+    if np.mean(cross) < 0:
+        coords_2d[:, 0] = -coords_2d[:, 0]
+
+    return coords_2d
