@@ -7,6 +7,7 @@ and extracting paths and loops from graph structures.
 
 import logging
 import warnings
+from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -48,13 +49,7 @@ def skeleton_to_graph(
     pts_homo = transform_points_inverse(affine, pts_scaled)
 
     tree = spatial.cKDTree(pts_homo, leafsize=8)
-    neighbors = tree.query_ball_point(pts_homo, r=1.75, p=2)  # find all points within 1 step of each other
-    edges = []
-    for n0, neighborhood in enumerate(neighbors):
-        neighborhood.remove(n0)
-        pairs = [[n0, n] for n in neighborhood]
-        edges += [tuple(sorted(p)) for p in pairs]
-    edges = list(set(edges))
+    edges = list(tree.query_pairs(r=1.75, p=2))  # all unique (i<j) pairs within 1 voxel step
 
     graph = ig.Graph(len(pts_scaled), edges)
     # keep track of coordinates
@@ -108,6 +103,107 @@ def get_largest_loop(graph: ig.Graph) -> np.ndarray:
     return loop
 
 
+def get_largest_loop_fast(graph: ig.Graph) -> np.ndarray:
+    """Find the largest loop in a graph using fundamental cycles.
+
+    Builds a BFS spanning tree once and checks only non-tree edges,
+    each of which defines exactly one fundamental cycle via LCA in
+    the tree.  O(V + E) versus O(E * (V + E)) for the naive approach.
+
+    Parameters
+    ----------
+    graph : igraph.Graph
+        Input graph with 'coord' vertex attribute.
+
+    Returns
+    -------
+    loop : (N, 3) ndarray
+        3D coordinates of vertices forming the largest loop.
+    """
+    coords = np.row_stack(graph.vs.get_attribute_values('coord'))
+    n = len(coords)
+
+    if n == 0:
+        return np.empty((0, 3))
+
+    # BFS spanning tree from vertex 0
+    parent = np.full(n, -1, dtype=np.int32)
+    depth = np.zeros(n, dtype=np.int32)
+    visited = np.zeros(n, dtype=bool)
+    tree_edges = set()
+
+    root = 0
+    visited[root] = True
+    queue = deque([root])
+
+    while queue:
+        u = queue.popleft()
+        for v in graph.neighbors(u):
+            if not visited[v]:
+                visited[v] = True
+                parent[v] = u
+                depth[v] = depth[u] + 1
+                tree_edges.add((min(u, v), max(u, v)))
+                queue.append(v)
+
+    # identify non-tree edges (each defines one fundamental cycle)
+    all_edges = set()
+    for e in graph.get_edgelist():
+        all_edges.add((min(e[0], e[1]), max(e[0], e[1])))
+
+    non_tree_edges = all_edges - tree_edges
+
+    # for each non-tree edge, find cycle via LCA
+    best_len = 0
+    best_path = []
+
+    for u, v in non_tree_edges:
+        # skip if either endpoint wasn't reached by BFS (disconnected)
+        if not visited[u] or not visited[v]:
+            continue
+
+        # find LCA by walking both up to same depth, then walking together
+        a, b = u, v
+
+        # bring deeper node up to same depth
+        while depth[a] > depth[b]:
+            a = parent[a]
+        while depth[b] > depth[a]:
+            b = parent[b]
+
+        # walk both up until they meet
+        while a != b:
+            a = parent[a]
+            b = parent[b]
+        lca = a
+
+        # cycle length = depth[u] + depth[v] - 2*depth[lca] + 1
+        cycle_len = depth[u] + depth[v] - 2 * depth[lca] + 1
+
+        if cycle_len > best_len:
+            best_len = cycle_len
+
+            # reconstruct cycle: u -> lca, then lca -> v (reversed)
+            path_u = []
+            a = u
+            while a != lca:
+                path_u.append(a)
+                a = parent[a]
+            path_u.append(lca)
+
+            path_v = []
+            b = v
+            while b != lca:
+                path_v.append(b)
+                b = parent[b]
+            # path_v goes v -> lca, we want lca -> v, so reverse
+            # full cycle: u -> lca -> v  (path_u + reversed path_v without lca)
+            path_v.reverse()
+            best_path = path_u + path_v  # path_v excludes lca, no skip needed
+
+    return coords[best_path]
+
+
 def get_longest_path(graph: ig.Graph) -> np.ndarray:
     """
     Find the longest path in a graph.
@@ -154,6 +250,44 @@ def get_longest_path(graph: ig.Graph) -> np.ndarray:
 
     loop = coords[long_path]
     return loop
+
+
+def get_longest_path_fast(graph: ig.Graph) -> np.ndarray:
+    """Find the longest shortest path using double-BFS diameter heuristic.
+
+    Two BFS passes find approximate diameter endpoints in O(V+E),
+    replacing the O(K^2 * (V+E)) extremity-pair search.  Exact on
+    trees; near-optimal on sparse skeleton graphs.
+
+    Parameters
+    ----------
+    graph : igraph.Graph
+        Input graph with 'coord' vertex attribute.
+
+    Returns
+    -------
+    path : (N, 3) ndarray
+        3D coordinates of vertices forming the longest path.
+    """
+    coords = np.row_stack(graph.vs.get_attribute_values('coord'))
+    n = len(coords)
+    if n == 0:
+        return np.empty((0, 3))
+
+    # BFS from vertex 0 → farthest vertex u
+    d0 = np.array(graph.distances(0)[0])
+    u = int(np.argmax(d0))
+
+    # BFS from u → farthest vertex v
+    du = np.array(graph.distances(u)[0])
+    v = int(np.argmax(du))
+
+    # reconstruct path
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        path = graph.get_shortest_paths(u, v)[0]
+
+    return coords[path]
 
 
 def redistribute_evenly(

@@ -10,7 +10,7 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 from ..tools import geometric_utilities as util
-from bg3dtools.mesh.laplace import gaussian_curvature, laplacian_smoothing
+from bg3dtools.mesh.laplace import gaussian_curvature, laplacian_smoothing_batch
 
 # from shot_descriptor import calculate_SHOT_descriptors
 
@@ -36,7 +36,7 @@ def generate_sequence(xmin, xmax, nsamples, sequence_type="log_linear"):
 def gaussian_descriptor(mesh, num):
     k = gaussian_curvature(mesh.v, mesh.f)
     mus = [10.0 ** (-t) for t in np.linspace(1, 9, num=num, endpoint=True)]
-    ks = [laplacian_smoothing(mesh.l, mesh.mass, k, mu=mu) for mu in mus]
+    ks = laplacian_smoothing_batch(mesh.l, mesh.mass, k, mus)
     return np.stack(ks, axis=-1)
 
 

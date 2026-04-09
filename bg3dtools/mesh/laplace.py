@@ -20,6 +20,7 @@ __all__ = [
     "laplace_beltrami_operator",
     "laplace_eigen_decomposition",
     "laplacian_smoothing",
+    "laplacian_smoothing_batch",
     "gaussian_curvature",
     "biharmonic_embedding",
     "laplacian_spectrum",
@@ -243,6 +244,27 @@ def laplacian_spectrum(
 # Smoothing, curvature, and embeddings
 # ---------------------------------------------------------------------------
 
+def _laplacian_smooth_invariants(
+    l: spmatrix,
+    m: spmatrix,
+) -> Tuple[spmatrix, spmatrix, spmatrix]:
+    """
+    Precompute the parts of Laplacian smoothing that depend only on l and m.
+
+    Returns (m_csc, ql, m_csc) where ql = l^T @ (M^{-1} @ L).
+    Reuse across multiple mu values to avoid redundant sparse solves.
+    """
+    m_csc = m.tocsc() if sparse.issparse(m) else m
+    l_csc = l.tocsc() if sparse.issparse(l) else l
+    is_diag = sparse.issparse(m_csc) and (m_csc.nnz <= m_csc.shape[0])
+    if is_diag:
+        m_inv_l = diags(1.0 / (m_csc.diagonal() + 1e-12)) @ l_csc
+    else:
+        m_inv_l = spsolve(m_csc, l_csc)
+    ql = l_csc.T @ m_inv_l
+    return m_csc, ql
+
+
 def laplacian_smoothing(
     l: spmatrix,
     m: spmatrix,
@@ -268,15 +290,38 @@ def laplacian_smoothing(
     s_smooth : (n, 3) ndarray
         Smoothed vertex positions.
     """
-    # Fast path: if m is diagonal, avoid dense NxN intermediate from spsolve
-    m_csr = m.tocsr() if sparse.issparse(m) else m
-    is_diag = sparse.issparse(m_csr) and (m_csr.nnz <= m_csr.shape[0])
-    if is_diag:
-        m_inv_l = diags(1.0 / (m_csr.diagonal() + 1e-12)) @ l
-    else:
-        m_inv_l = spsolve(m, l)
-    ql = l.T @ m_inv_l
-    return spsolve(mu * ql + (1 - mu) * m, m.dot(s))
+    m_csc, ql = _laplacian_smooth_invariants(l, m)
+    return spsolve((mu * ql + (1 - mu) * m_csc).tocsc(), m_csc.dot(s))
+
+
+def laplacian_smoothing_batch(
+    l: spmatrix,
+    m: spmatrix,
+    s: np.ndarray,
+    mus: list,
+) -> list:
+    """
+    Laplacian smoothing at multiple mu values, computing invariants once.
+
+    Parameters
+    ----------
+    l : (n, n) sparse matrix
+        Cotangent Laplacian (stiffness matrix).
+    m : (n, n) sparse matrix
+        Mass matrix.
+    s : (n, d) ndarray
+        Signal to smooth (vertex positions or scalar field).
+    mus : list of float
+        Smoothing parameters.
+
+    Returns
+    -------
+    results : list of ndarray
+        Smoothed signals, one per mu value.
+    """
+    m_csc, ql = _laplacian_smooth_invariants(l, m)
+    ms = m_csc.dot(s)
+    return [spsolve((mu * ql + (1 - mu) * m_csc).tocsc(), ms) for mu in mus]
 
 
 def gaussian_curvature(
