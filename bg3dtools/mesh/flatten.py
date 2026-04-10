@@ -14,6 +14,7 @@ __all__ = [
     "rasterize_mesh_2d",
     "has_flipped_triangles",
     "mds_flatten",
+    "lscm_flatten",
 ]
 
 
@@ -333,9 +334,108 @@ def mds_flatten(
     angle = np.arctan2(target_2d[0], target_2d[1])  # angle from +y axis
     cos_a, sin_a = np.cos(-angle), np.sin(-angle)
     R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
-    coords_2d = coords_2d @ R.T
+    coords_2d = coords_2d @ R
 
     # 7. Fix handedness: flip x if mean signed area is negative
+    v0 = coords_2d[faces[:, 0]]
+    v1 = coords_2d[faces[:, 1]]
+    v2 = coords_2d[faces[:, 2]]
+    cross = (v1[:, 0] - v0[:, 0]) * (v2[:, 1] - v0[:, 1]) - \
+            (v1[:, 1] - v0[:, 1]) * (v2[:, 0] - v0[:, 0])
+    if np.mean(cross) < 0:
+        coords_2d[:, 0] = -coords_2d[:, 0]
+
+    return coords_2d
+
+
+def lscm_flatten(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    center_idx: int,
+    up_direction: np.ndarray,
+) -> np.ndarray:
+    """Flatten a mesh patch to 2D using Least-Squares Conformal Mapping.
+
+    LSCM computes a conformal (angle-preserving) parameterization via a sparse
+    linear solve, making it orders of magnitude faster than MDS for large
+    submeshes while producing comparable quality on disk-topology patches.
+
+    Parameters
+    ----------
+    verts : (N, 3) ndarray
+        Submesh vertex coordinates.
+    faces : (F, 3) ndarray
+        Submesh triangle indices.
+    center_idx : int
+        Index of the center vertex in the submesh (will be placed at origin).
+    up_direction : (3,) ndarray
+        Cranial direction in 3D, used to orient the 2D embedding so that
+        the most "upward" vertex (in 3D) maps to +y in 2D.
+
+    Returns
+    -------
+    coords_2d : (N, 2) ndarray
+        Flattened 2D coordinates, centered on ``center_idx`` with
+        consistent orientation.
+
+    Raises
+    ------
+    ValueError
+        If LSCM fails (e.g. degenerate mesh or no boundary).
+    """
+    import igl
+
+    verts = np.asarray(verts, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int32)
+    up_direction = np.asarray(up_direction, dtype=np.float64)
+
+    # 1. Get boundary loop
+    boundary = igl.boundary_loop(faces)
+    if len(boundary) < 2:
+        raise ValueError("Mesh has no boundary; LSCM requires a boundary loop.")
+
+    # 2. Pin two boundary vertices:
+    #    - closest to center (anchors the center region)
+    #    - farthest in the "up" direction (gives stable orientation)
+    boundary_verts = verts[boundary]
+    center_pos = verts[center_idx]
+
+    dists_to_center = np.linalg.norm(boundary_verts - center_pos, axis=1)
+    pin_near = boundary[np.argmin(dists_to_center)]
+
+    rel_3d = boundary_verts - center_pos
+    up_proj = rel_3d @ up_direction
+    pin_up = boundary[np.argmax(up_proj)]
+
+    # If both pins are the same vertex, pick the farthest from center instead
+    if pin_near == pin_up:
+        pin_up = boundary[np.argmax(dists_to_center)]
+
+    b = np.array([pin_near, pin_up], dtype=np.int32)
+    bc = np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float64)
+
+    # 3. Solve LSCM
+    success, uv = igl.lscm(verts, faces, b, bc)
+    if not success:
+        raise ValueError("LSCM solve failed on this submesh.")
+
+    coords_2d = uv.astype(np.float64)
+
+    # 4. Center on center_idx
+    coords_2d -= coords_2d[center_idx]
+
+    # 5. Orient: rotate so the most "upward" vertex (in 3D) maps to +y
+    rel_3d_all = verts - verts[center_idx]
+    up_proj_all = rel_3d_all @ up_direction
+    up_vertex = np.argmax(up_proj_all)
+
+    target_2d = coords_2d[up_vertex]
+    angle = np.arctan2(target_2d[0], target_2d[1])  # angle from +y axis
+    cos_a, sin_a = np.cos(-angle), np.sin(-angle)
+    R = np.array([[cos_a, -sin_a], [sin_a, cos_a]])
+    coords_2d = coords_2d @ R
+
+    # 6. Fix handedness: flip x if mean signed area is negative
     v0 = coords_2d[faces[:, 0]]
     v1 = coords_2d[faces[:, 1]]
     v2 = coords_2d[faces[:, 2]]
