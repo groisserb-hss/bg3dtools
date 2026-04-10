@@ -14,7 +14,6 @@ import numpy as np
 import scipy.spatial as spatial
 import igraph as ig
 
-from bg3dtools.transforms_unified import transform_points_inverse
 from bg3dtools.pointclouds.quantize import convert_to_points
 
 
@@ -45,11 +44,11 @@ def skeleton_to_graph(
     log = logging.getLogger('Vertebra.skeleton_to_graph')
     # log.info('convert skeleton to graph')
 
+    voxel_pts = np.argwhere(skeleton).astype(np.float64)
     pts_scaled = convert_to_points(skeleton, affine)
-    pts_homo = transform_points_inverse(affine, pts_scaled)
 
-    tree = spatial.cKDTree(pts_homo, leafsize=8)
-    edges = list(tree.query_pairs(r=1.75, p=2))  # all unique (i<j) pairs within 1 voxel step
+    tree = spatial.cKDTree(voxel_pts, leafsize=8)
+    edges = list(tree.query_pairs(r=1.75, p=2))  # 26-connected in voxel space
 
     graph = ig.Graph(len(pts_scaled), edges)
     # keep track of coordinates
@@ -103,28 +102,36 @@ def get_largest_loop(graph: ig.Graph) -> np.ndarray:
     return loop
 
 
-def get_largest_loop_fast(graph: ig.Graph) -> np.ndarray:
-    """Find the largest loop in a graph using fundamental cycles.
+def get_all_loops(
+    graph: ig.Graph,
+    min_cycle_len: int = 10,
+) -> tuple[list[list[int]], np.ndarray]:
+    """Find all fundamental cycles in a graph.
 
-    Builds a BFS spanning tree once and checks only non-tree edges,
-    each of which defines exactly one fundamental cycle via LCA in
-    the tree.  O(V + E) versus O(E * (V + E)) for the naive approach.
+    O(V+E) BFS spanning tree + LCA cycle reconstruction.
 
     Parameters
     ----------
     graph : igraph.Graph
         Input graph with 'coord' vertex attribute.
+    min_cycle_len : int, optional
+        Minimum number of vertices in a cycle to keep. Cycles shorter than
+        this are discarded before path reconstruction (cheap length estimate
+        via BFS depths). Set to 0 to return all cycles. Default is 10.
 
     Returns
     -------
-    loop : (N, 3) ndarray
-        3D coordinates of vertices forming the largest loop.
+    cycles : list of list[int]
+        Vertex indices for each cycle, sorted by length (largest first).
+        Empty list if no cycles exist.
+    coords : (V, 3) ndarray
+        All vertex coordinates.
     """
     coords = np.row_stack(graph.vs.get_attribute_values('coord'))
     n = len(coords)
 
     if n == 0:
-        return np.empty((0, 3))
+        return [], coords
 
     # BFS spanning tree from vertex 0
     parent = np.full(n, -1, dtype=np.int32)
@@ -154,8 +161,7 @@ def get_largest_loop_fast(graph: ig.Graph) -> np.ndarray:
     non_tree_edges = all_edges - tree_edges
 
     # for each non-tree edge, find cycle via LCA
-    best_len = 0
-    best_path = []
+    all_cycles = []
 
     for u, v in non_tree_edges:
         # skip if either endpoint wasn't reached by BFS (disconnected)
@@ -177,31 +183,35 @@ def get_largest_loop_fast(graph: ig.Graph) -> np.ndarray:
             b = parent[b]
         lca = a
 
-        # cycle length = depth[u] + depth[v] - 2*depth[lca] + 1
-        cycle_len = depth[u] + depth[v] - 2 * depth[lca] + 1
+        # cheap cycle length estimate before full reconstruction
+        cycle_len = int(depth[u]) + int(depth[v]) - 2 * int(depth[lca]) + 1
+        if cycle_len < min_cycle_len:
+            continue
 
-        if cycle_len > best_len:
-            best_len = cycle_len
+        # reconstruct cycle: u -> lca, then lca -> v (reversed)
+        path_u = []
+        a = u
+        while a != lca:
+            path_u.append(a)
+            a = parent[a]
+        path_u.append(lca)
 
-            # reconstruct cycle: u -> lca, then lca -> v (reversed)
-            path_u = []
-            a = u
-            while a != lca:
-                path_u.append(a)
-                a = parent[a]
-            path_u.append(lca)
+        path_v = []
+        b = v
+        while b != lca:
+            path_v.append(b)
+            b = parent[b]
+        # path_v goes v -> lca, we want lca -> v, so reverse
+        # full cycle: u -> lca -> v  (path_u + reversed path_v without lca)
+        path_v.reverse()
+        cycle = path_u + path_v
 
-            path_v = []
-            b = v
-            while b != lca:
-                path_v.append(b)
-                b = parent[b]
-            # path_v goes v -> lca, we want lca -> v, so reverse
-            # full cycle: u -> lca -> v  (path_u + reversed path_v without lca)
-            path_v.reverse()
-            best_path = path_u + path_v  # path_v excludes lca, no skip needed
+        all_cycles.append(cycle)
 
-    return coords[best_path]
+    # sort by length, largest first
+    all_cycles.sort(key=len, reverse=True)
+
+    return all_cycles, coords
 
 
 def get_longest_path(graph: ig.Graph) -> np.ndarray:

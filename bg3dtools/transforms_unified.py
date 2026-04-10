@@ -607,7 +607,7 @@ def transform_points_inverse(aff: ArrayLike, pts: ArrayLike, bk=None) -> ArrayLi
     """
     if bk is None:
         bk = infer_backend(aff)
-    return transform_points_forward(inverse_rigid(aff, bk), pts, bk)
+    return transform_points_forward(inverse(aff, bk), pts, bk)
 
 
 def rel_params_to_aff(trunk: list, rel_twist: ArrayLike, rel_trans: ArrayLike, bk=None):
