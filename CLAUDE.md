@@ -97,7 +97,7 @@ from bg3dtools.pytorch import TorchBackend, infer_backend  # if torch installed
 | `pose_landmarking/` | MediaPipe pose detection, joint mapping, segmentation |
 | `image_tools/` | Image packing, filters, video I/O |
 | `iphone/` | iOS depth scanning data I/O (Stray Scanner & Record3D) |
-| `render/` | Colors/colormaps; visualization via `render.trimesh` or `render.o3d` |
+| `render/` | Colors/colormaps; visualization via `render.trimesh` or `render.o3d`; `run_isolated()` subprocess wrapper |
 | `utils/` | Timing, algorithms (FPS, PCA), filesystem, stats |
 | `utils/cifs_wrappers/` | Network filesystem I/O with exponential backoff retry |
 | `transforms_unified.py` | Rotation/affine transforms (twist/quaternion/matrix) |
@@ -108,6 +108,21 @@ Separate package (included in setuptools config) for dense mesh correspondence u
 - `spectral_match/pipeline.py` - `FunctionalMapper` orchestrates eigendecomposition → descriptors → functional map solving → product manifold filtering
 - Uses bg3dtools mesh utilities for Laplacian computation and I/O
 - Configured via `SigConfig` and `MatchConfig` namedtuples
+
+## macOS Open3D Rendering Caveat
+
+On macOS, Open3D's `Visualizer` creates Cocoa/OpenGL windows even with `visible=False`. Repeated create/destroy cycles accumulate window-server resources and eventually deadlock the process (low CPU, immune to Ctrl-C). The `OffscreenRenderer` (EGL-based) is not available on macOS.
+
+**Fix**: Use `run_isolated()` from `bg3dtools.render.o3d` to run rendering functions in a spawned subprocess. All GPU handles are released when the child exits.
+
+```python
+from bg3dtools.render.o3d import run_isolated
+
+# Each call gets a fresh GPU context — no resource accumulation
+run_isolated(my_render_function, arg1, arg2, timeout=120)
+```
+
+The legacy `_render_legacy()` fallback uses `visible=False` to minimize window flashing, but subprocess isolation is still needed for batch pipelines that render many figures.
 
 ## Code Style
 

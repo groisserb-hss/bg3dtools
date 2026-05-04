@@ -13,6 +13,7 @@ from .packing import (
     create_packed_image,
     create_packed_video,
 )
+from .interpolation import laplace_interpolation
 
 __all__ = [
     "normal_edges",
@@ -22,4 +23,5 @@ __all__ = [
     "pack_images",
     "create_packed_image",
     "create_packed_video",
+    "laplace_interpolation",
 ]

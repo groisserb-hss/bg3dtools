@@ -56,13 +56,15 @@ def read_triangle_mesh(
         raise FileNotFoundError(f"File not found: {file}")
 
     import trimesh
-    mesh = trimesh.load_mesh(file, process=process)
+    mesh = trimesh.load(file, process=process)
     if isinstance(mesh, trimesh.Scene):
         geometries = list(mesh.geometry.values())
         mesh = geometries[0]
-    v, f = mesh.vertices, mesh.faces
-    v = np.ascontiguousarray(v)
-    f = np.ascontiguousarray(f)
+    v = np.ascontiguousarray(mesh.vertices)
+    if isinstance(mesh, trimesh.PointCloud):
+        f = np.empty((0, 3), dtype=np.int64)
+    else:
+        f = np.ascontiguousarray(mesh.faces)
     return v, f
 
 

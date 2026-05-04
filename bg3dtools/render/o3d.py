@@ -5,12 +5,62 @@ This module provides convenient functions for visualizing point clouds
 and triangle meshes using the Open3D library.
 """
 
+import functools
+import logging
+import multiprocessing as mp
 from typing import Optional, Tuple, List
+
 import numpy as np
 import open3d as o3d
 from open3d.visualization import draw_geometries
 
 from .colors import default_colors, get_heatmap_color
+
+_log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Subprocess isolation for headless / batch rendering
+# ---------------------------------------------------------------------------
+
+def run_isolated(fn, *args, timeout=120, **kwargs):
+    """Run *fn* in a spawned subprocess to isolate GPU / OpenGL state.
+
+    On macOS, Open3D's Visualizer accumulates Cocoa window-server and
+    OpenGL resources across repeated create/destroy cycles.  After enough
+    iterations the process deadlocks in C-level code (low CPU, immune to
+    Ctrl-C).  Running each render call in its own ``spawn``-ed process
+    guarantees a fresh GPU context every time; all handles are released
+    when the child exits.
+
+    Parameters
+    ----------
+    fn : callable
+        Must be importable (module-level function) so the ``spawn`` start
+        method can pickle it.
+    *args, **kwargs
+        Forwarded to *fn*.  Must be picklable.
+    timeout : float
+        Seconds to wait before killing the subprocess.
+
+    Returns
+    -------
+    bool
+        True if the subprocess finished with exit code 0.
+    """
+    ctx = mp.get_context('spawn')
+    p = ctx.Process(target=fn, args=args, kwargs=kwargs)
+    p.start()
+    p.join(timeout=timeout)
+    if p.is_alive():
+        p.kill()
+        p.join()
+        _log.warning('%s timed out after %ds, killed', fn.__name__, timeout)
+        return False
+    if p.exitcode != 0:
+        _log.warning('%s failed (exit code %d)', fn.__name__, p.exitcode)
+        return False
+    return True
 
 
 def get_cam_params_o3d(
@@ -373,22 +423,28 @@ def render_mesh_to_image(geom, lookat, eye, up, width=400, height=400, fov=45.0)
         return _render_legacy(geom, lookat, eye, up, width, height)
 
 
+_offscreen_cache = {}  # (width, height) -> OffscreenRenderer
+
+
 def _render_offscreen(geom, lookat, eye, up, width, height, fov):
     import open3d.visualization.rendering as rendering
-    renderer = rendering.OffscreenRenderer(width, height)
+    key = (width, height)
+    if key not in _offscreen_cache:
+        _offscreen_cache[key] = rendering.OffscreenRenderer(width, height)
+    renderer = _offscreen_cache[key]
     renderer.scene.set_background(np.array([1, 1, 1, 1], dtype=np.float32))
     mat = rendering.MaterialRecord()
     mat.shader = "defaultLit"
     renderer.scene.add_geometry("mesh", geom, mat)
     renderer.setup_camera(fov, lookat, eye, up)
-    return np.asarray(renderer.render_to_image())
+    img = np.asarray(renderer.render_to_image()).copy()
+    renderer.scene.clear_geometry()
+    return img
 
 
 def _render_legacy(geom, lookat, eye, up, width, height):
-    import sys
-    visible = sys.platform == 'darwin'
     vis = o3d.visualization.Visualizer()
-    vis.create_window(width=width, height=height, visible=visible)
+    vis.create_window(width=width, height=height, visible=False)
     vis.get_render_option().background_color = np.array([1, 1, 1])
     vis.add_geometry(geom)
     ctr = vis.get_view_control()
