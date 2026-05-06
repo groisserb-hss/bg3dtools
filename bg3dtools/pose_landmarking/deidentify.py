@@ -23,7 +23,7 @@ from .resource_paths import face_weights
 # Keep MediaPipe logging quieter (but do not swallow real errors).
 os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("MEDIAPIPE_DISABLE_GPU", "1")
+os.environ.setdefault("MEDIAPIPE_DISABLE_GPU", "0")
 
 
 # A small set of BlazePose landmark *indices* that roughly bound the face.

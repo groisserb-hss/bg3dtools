@@ -10,7 +10,7 @@ from typing import Optional
 # Suppress MediaPipe/TensorFlow C++ logs (must be before import)
 os.environ["GLOG_minloglevel"] = "2"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
+os.environ.setdefault("MEDIAPIPE_DISABLE_GPU", "0")
 
 from ..utils import SuppressCppStderr
 
