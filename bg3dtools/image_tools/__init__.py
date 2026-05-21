@@ -14,6 +14,7 @@ from .packing import (
     create_packed_video,
 )
 from .interpolation import laplace_interpolation
+from .metrics import dice_score, normalized_cross_correlation, gradient_correlation
 
 __all__ = [
     "normal_edges",
@@ -24,4 +25,7 @@ __all__ = [
     "create_packed_image",
     "create_packed_video",
     "laplace_interpolation",
+    "dice_score",
+    "normalized_cross_correlation",
+    "gradient_correlation",
 ]

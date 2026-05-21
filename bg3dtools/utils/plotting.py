@@ -30,6 +30,7 @@ def bland_altman(
         show_proportional_bias: bool = True,
         loa_factor: float = 1.96,
         annotate: bool = True,
+        annotate_position: str = "auto",
 ) -> Tuple[plt.Figure, plt.Axes, Dict[str, float]]:
     """
     Create a Bland–Altman plot comparing two sets of measurements.
@@ -59,6 +60,10 @@ def bland_altman(
         Multiplier for limits of agreement (default 1.96 ≈ 95% LoA).
     annotate : bool
         If True, annotate mean diff and LoA on the plot.
+    annotate_position : {"auto", "top", "bottom"}
+        Vertical placement of the annotation block. "auto" (default) picks
+        the side opposite the bias — bottom if mean_diff >= 0, top otherwise —
+        so the text lands in the empty half of the plot.
 
     Returns
     -------
@@ -180,10 +185,26 @@ def bland_altman(
         ]
         if slope is not None:
             lines.append(f"Slope = {slope:.3g}")
+
+        position = annotate_position
+        if position == "auto":
+            # Place opposite the bias: positive bias clusters data upward,
+            # so the bottom is empty (and vice versa).
+            position = "bottom" if mean_diff >= 0 else "top"
+        if position == "bottom":
+            text_y, va = 0.02, "bottom"
+        elif position == "top":
+            text_y, va = 0.98, "top"
+        else:
+            raise ValueError(
+                "annotate_position must be 'auto', 'top', or 'bottom'; "
+                f"got {annotate_position!r}"
+            )
+
         ax.text(
-            0.02, 0.02, "\n".join(lines),
+            0.02, text_y, "\n".join(lines),
             transform=ax.transAxes,
-            va="bottom", ha="left"
+            va=va, ha="left"
         )
 
     ax.grid(True, linestyle=":", linewidth=0.5)
