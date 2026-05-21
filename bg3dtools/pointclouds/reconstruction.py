@@ -5,12 +5,29 @@ This module provides functions for converting depth images to 3D point
 clouds with optional normal estimation.
 """
 
+from __future__ import annotations
+
 from typing import Tuple, Optional, Union
 import numpy as np
-import open3d as o3d
 from scipy.ndimage import convolve
 from PIL import Image
 from bg3dtools.image_tools import normal_edges
+
+try:
+    import open3d as o3d
+    HAS_OPEN3D = True
+except ImportError:
+    o3d = None
+    HAS_OPEN3D = False
+
+
+def _require_open3d():
+    if not HAS_OPEN3D:
+        raise ImportError(
+            "open3d is required for depth_to_pc. "
+            "Install with: pip install 'bg3dtools[viz]'"
+        )
+
 
 __all__ = [
     "scale_intrinsics",
@@ -248,6 +265,7 @@ def depth_to_pc(
     pc : o3d.geometry.PointCloud
         Point cloud with optional colors and normals.
     """
+    _require_open3d()
     DEPTH_HEIGHT, DEPTH_WIDTH = depth.shape
     MIN_DEPTH, MAX_DEPTH = depth_range
 

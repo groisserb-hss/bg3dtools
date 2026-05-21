@@ -10,18 +10,21 @@ requires-python = ">=3.9"
 dependencies = [
     "numpy",
     "scipy",
-    "scikit-learn",
     "libigl",
     "Pillow",
+    "imageio",
 ]
 
 [project.optional-dependencies]
-torch = ["torch"]
-mesh = ["trimesh", "plyfile", "triangle"]
+mesh   = ["trimesh", "plyfile", "triangle"]
+learn  = ["scikit-learn"]
+torch  = ["torch"]
 vision = ["opencv-python", "mediapipe"]
-viz = ["open3d"]
+viz    = ["open3d", "matplotlib"]
+graph  = ["igraph"]
+io     = ["tenacity"]
 all = [
-    "bg3dtools[torch,mesh,vision,viz]",
+    "bg3dtools[mesh,learn,torch,vision,viz,graph,io]",
 ]
 
 [tool.setuptools.packages.find]

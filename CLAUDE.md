@@ -65,18 +65,28 @@ make_aff(twist, trans)  # [..., 3], [..., 3] -> [..., 4, 4]
 
 ### Dependencies
 
-**Hard dependencies** (always required): numpy, scipy, libigl, scikit-learn, Pillow
+**Hard dependencies** (always required): numpy, scipy, libigl, Pillow, imageio
 
-**Soft dependencies** (lazy-loaded inside functions): trimesh, plyfile, open3d, pytorch, mediapipe, cv2
+**Optional dependencies** are organized into extras in `pyproject.toml`:
+- `mesh`   — trimesh, plyfile, triangle
+- `learn`  — scikit-learn (only needed by `utils.load_pca`)
+- `torch`  — torch
+- `vision` — opencv-python, mediapipe
+- `viz`    — open3d, matplotlib
+- `graph`  — igraph (only needed by `bg3dtools.graphs`)
+- `io`     — tenacity (only needed by `utils.cifs_wrappers`)
+- `all`    — bundles all of the above
 
-Soft dependencies use lazy imports inside functions to avoid import errors:
+Install with: `pip install 'bg3dtools[all]'` or pick the extras you need.
+
+Optional deps are lazy-loaded inside functions:
 ```python
 def read_triangle_mesh(file, process=False):
     import trimesh  # Lazy import
     mesh = trimesh.load_mesh(file, process=process)
 ```
 
-Optional dependency groups are defined in `pyproject.toml`: `torch`, `mesh`, `vision`, `viz`, `all`.
+Subpackages that wrap optional-dep modules use try/except in `__init__.py` so the package still imports without the extra (the optional symbols become `None`).
 
 ## Module Organization
 
@@ -113,10 +123,10 @@ Separate package (included in setuptools config) for dense mesh correspondence u
 
 On macOS, Open3D's `Visualizer` creates Cocoa/OpenGL windows even with `visible=False`. Repeated create/destroy cycles accumulate window-server resources and eventually deadlock the process (low CPU, immune to Ctrl-C). The `OffscreenRenderer` (EGL-based) is not available on macOS.
 
-**Fix**: Use `run_isolated()` from `bg3dtools.render.o3d` to run rendering functions in a spawned subprocess. All GPU handles are released when the child exits.
+**Fix**: Use `run_isolated()` from `bg3dtools.render` to run rendering functions in a spawned subprocess. All GPU handles are released when the child exits.
 
 ```python
-from bg3dtools.render.o3d import run_isolated
+from bg3dtools.render import run_isolated
 
 # Each call gets a fresh GPU context — no resource accumulation
 run_isolated(my_render_function, arg1, arg2, timeout=120)

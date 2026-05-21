@@ -9,11 +9,43 @@ import igl
 from scipy.stats import mode
 import numpy as np
 from typing import Tuple, Optional, Union
-from sklearn.manifold import MDS
-import matplotlib.path as matpath
 import scipy.sparse as sparse
 
 from bg3dtools.mesh.utils import submesh, sample_E2V, mesh_volume, extract_manifold_patches
+
+
+def _mds_flatten(points: np.ndarray) -> np.ndarray:
+    """Classical (Torgerson) MDS to 2D.
+
+    Closed-form: double-center the squared-distance matrix and take the top
+    two eigenvectors scaled by sqrt of their eigenvalues. For roughly planar
+    boundary loops this is essentially a PCA projection; for non-planar
+    loops it preserves pairwise distances as best as possible.
+    """
+    n = points.shape[0]
+    diff = points[:, None, :] - points[None, :, :]
+    D2 = (diff * diff).sum(-1)
+    J = np.eye(n) - np.full((n, n), 1.0 / n)
+    B = -0.5 * J @ D2 @ J
+    w, V = np.linalg.eigh(B)  # ascending
+    idx = np.argsort(w)[::-1][:2]
+    w2 = np.clip(w[idx], 0.0, None)
+    return V[:, idx] * np.sqrt(w2)
+
+
+def _points_in_polygon(query_pts: np.ndarray, polygon: np.ndarray) -> np.ndarray:
+    """Vectorized ray-casting point-in-polygon test."""
+    qx = query_pts[:, 0:1]
+    qy = query_pts[:, 1:2]
+    px = polygon[:, 0]
+    py = polygon[:, 1]
+    px2 = np.roll(px, -1)
+    py2 = np.roll(py, -1)
+    straddles = (py > qy) != (py2 > qy)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        x_int = (px2 - px) * (qy - py) / (py2 - py) + px
+    crosses = straddles & (qx < x_int)
+    return (crosses.sum(axis=1) % 2).astype(bool)
 
 __all__ = [
     "bounding_box_diagonal",
@@ -190,12 +222,10 @@ def fill_hole(verts: np.ndarray, faces: np.ndarray, boundary_vidx: np.ndarray) -
         faces = np.row_stack([faces, boundary_vidx])
 
     elif len(boundary_vidx) > 3:
-        mds = MDS(n_components=2, normalized_stress='auto')
-
         nV = boundary_vidx.shape[0]
         seg = np.column_stack((np.arange(nV), np.arange(1, nV + 1) % nV))
         b_verts = verts[boundary_vidx]
-        flatV = mds.fit_transform(b_verts)
+        flatV = _mds_flatten(b_verts)
 
         params = dict(vertices=flatV, segments=seg)
         import triangle
@@ -204,8 +234,7 @@ def fill_hole(verts: np.ndarray, faces: np.ndarray, boundary_vidx: np.ndarray) -
         # remove faces that are outside of polygon
         flatF = patch['triangles']
         bc = igl.barycenter(flatV, flatF).reshape(-1, 2)
-        path = matpath.Path(flatV)
-        flatF = flatF[path.contains_points(bc)]
+        flatF = flatF[_points_in_polygon(bc, flatV)]
         patch['triangles'] = flatF
         new_faces = boundary_vidx[flatF]
         faces = np.concatenate((faces, new_faces), axis=0)
