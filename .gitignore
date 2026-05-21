@@ -31,3 +31,6 @@ pip-delete-this-directory.txt
 .DS_Store
 *.swp
 *~
+
+# Claude Code local settings (per-machine, not shared)
+.claude/settings.local.json
