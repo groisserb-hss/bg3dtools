@@ -9,8 +9,6 @@ JAX-accelerated optimization.
 # Derived from pyFM by Robin Magnet (MIT License) — see /THIRD_PARTY_NOTICES.txt
 import math
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize
 from scipy.sparse import diags, lil_matrix, vstack
@@ -73,6 +71,11 @@ def commutator(x, y, operator=np.subtract):
 
 
 def spectral_functional(src, dst, k):
+    # jax is imported lazily here (its only use in this module) so that importing
+    # spectral_match does not require jax unless the functional-map solver is run.
+    import jax
+    import jax.numpy as jnp
+
     # Extraction
     ls, J_s = spectral_extraction(src, k)
     ld, J_d = spectral_extraction(dst, k)

@@ -23,8 +23,14 @@ vision = ["opencv-python", "mediapipe"]
 viz    = ["open3d", "matplotlib"]
 graph  = ["igraph"]
 io     = ["tenacity"]
+# Opt-in: the functional-map solver (FunctionalMapper.mesh_correspondence ->
+# spectral_functional) uses jax for JIT/autodiff. jax is imported lazily, so this
+# extra is only needed to actually run that solver. CPU jaxlib; pinned to the
+# 0.4.x line the code was developed against (0.4.18 is the earliest PyPI release;
+# the original 0.4.16 was an unpublished nightly).
+match  = ["jax[cpu]>=0.4.18,<0.5"]
 all = [
-    "bg3dtools[mesh,learn,torch,vision,viz,graph,io]",
+    "bg3dtools[mesh,learn,torch,vision,viz,graph,io,match]",
 ]
 
 [tool.setuptools.packages.find]
