@@ -88,6 +88,7 @@ def _normals_from_depth_grid(
     invalid_mask: Optional[np.ndarray] = None,
     rho: float = 0.02,
     k: int = 2,
+    spatial_sigma: float = 2.0,
     W: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """
@@ -114,62 +115,52 @@ def _normals_from_depth_grid(
         Unit normals (NaN where undetermined).
     """
     if W is None:
-        sigma = 2.0  # pixels; tune > noise but < corner scale
+        sigma = spatial_sigma  # pixels; tune > noise but < corner scale
         grid = np.arange(-k, k + 1)
         G = np.exp(-(grid ** 2) / (2 * sigma ** 2))
         W = (G[:, None] * G[None, :]).astype(np.float32)
 
     nR, nC, _ = P.shape
-    N = np.full_like(P, np.nan, dtype=np.float32)
+    L = (2 * k + 1) ** 2
+    w_flat = W.reshape(-1).astype(np.float32)
 
-    # Pad XYZ and weight arrays for border handling
-    pad = ((k, k), (k, k), (0, 0))
-    Pp = np.pad(P, pad, mode='edge')            # (nR+2k, nC+2k, 3)
+    # Pad XYZ + validity for border handling
+    Pp = np.pad(P, ((k, k), (k, k), (0, 0)), mode='edge')          # (nR+2k, nC+2k, 3)
     if invalid_mask is None:
-        Mp = np.zeros(P.shape[:2], bool)
+        Mp = np.zeros((nR + 2 * k, nC + 2 * k), dtype=bool)
     else:
-        Mp = np.pad(invalid_mask, ((k,k),(k,k)), constant_values=True)
+        Mp = np.pad(invalid_mask, ((k, k), (k, k)), constant_values=True)
 
-    # Vectorised over window ⇢ reshape tricks
-    w_flat = W.reshape(-1)
-    jj, ii = np.meshgrid(np.arange(-k, k+1), np.arange(-k, k+1), indexing='ij')
-    shifts = np.stack((ii.ravel(), jj.ravel()), axis=1)   # (L, 2), L=(2k+1)**2
+    # Gather each pixel's (2k+1)^2 neighbourhood -> (nR,nC,L,3) + neighbour-invalid -> (nR,nC,L).
+    # Offset order (di outer, dj inner) matches W.reshape(-1).
+    Q = np.empty((nR, nC, L, 3), dtype=np.float32)
+    Mn = np.empty((nR, nC, L), dtype=bool)
+    idx = 0
+    for di in range(-k, k + 1):
+        for dj in range(-k, k + 1):
+            Q[:, :, idx, :] = Pp[k + di:k + di + nR, k + dj:k + dj + nC, :]
+            Mn[:, :, idx] = Mp[k + di:k + di + nR, k + dj:k + dj + nC]
+            idx += 1
 
-    # Pre-pull neighbourhood offsets once
-    for r in range(nR):
-        for c in range(nC):
-            if Mp[r+k, c+k]:
-                continue                     # skip invalid centre point
+    # neighbour validity: within rho in depth AND not invalid (NaN depths -> False)
+    valid_nb = (np.abs(Q[:, :, :, 2] - P[:, :, 2][:, :, None]) < rho) & (~Mn)
+    cnt = valid_nb.sum(-1)
+    compute = (~Mp[k:k + nR, k:k + nC]) & (cnt >= 3)               # valid centre with >=3 neighbours
 
-            Q = Pp[r+ii+k, c+jj+k]           # (2k+1,2k+1,3) window view
-            Q = Q.reshape(-1, 3)             # (L, 3)
+    N = np.full((nR, nC, 3), np.nan, dtype=np.float32)
+    if not compute.any():
+        return N
 
-            # Depth difference clipping
-            dz = np.abs(Q[:, 2] - P[r, c, 2])
-            m_valid = (dz < rho) & (~Mp[r+ii+k, c+jj+k].ravel())
-            if m_valid.sum() < 3:
-                continue                     # not enough neighbours
-
-            w = w_flat[m_valid][:, None]     # (M, 1)
-            Qv = Q[m_valid]                  # (M, 3)
-
-            # Centroid
-            C = (w * Qv).sum(0) / w.sum()
-
-            # Weighted covariance
-            Qc = Qv - C
-            Cov = (w * Qc).T @ Qc            # (3, 3)
-
-            # Smallest eigenvalue eigenvector ⇒ normal
-            _, vecs = np.linalg.eigh(Cov)
-            n = vecs[:, 0]                   # already unit length
-
-            # Orient consistently: make z ≥ 0
-            if n[2] < 0:
-                n = -n
-
-            N[r, c] = n
-
+    # local weighted-PCA on the compute-subset only (M pixels) -> one batched eigh
+    Qs = np.nan_to_num(Q[compute], nan=0.0)                        # (M,L,3); invalid nbrs carry weight 0
+    w = w_flat[None, :] * valid_nb[compute]                        # (M,L)
+    C = (w[..., None] * Qs).sum(1) / np.maximum(w.sum(1)[:, None], 1e-12)
+    Qc = Qs - C[:, None, :]
+    Cov = np.einsum('mli,mlj->mij', w[..., None] * Qc, Qc)        # (M,3,3) weighted covariance
+    _, evec = np.linalg.eigh(Cov)
+    n = evec[:, :, 0]                                              # smallest-eigenvalue eigenvector
+    n = np.where((n[:, 2] < 0)[:, None], -n, n)                   # orient z >= 0
+    N[compute] = n
     return N
 
 
@@ -233,7 +224,9 @@ def depth_to_pc(
     depth_intrinsics: Union[np.ndarray, o3d.camera.PinholeCameraIntrinsic],
     rgb: Optional[np.ndarray],
     compute_normals: bool = True,
+    orient_normals: str = 'camera',
     remove_edges: bool = False,
+    edge_z_thresh: float = 0.03,
     depth_range: Tuple[float, float] = (0.3, np.inf),
     depth_scale: float = 1.0,
     project_valid_depth_only: bool = False
@@ -251,8 +244,13 @@ def depth_to_pc(
         RGB image for coloring points. Resized to match depth if needed.
     compute_normals : bool, optional
         If True, estimate surface normals. Default is True.
+    orient_normals : str, optional
+        'camera' (default) orients normals toward the camera (a visible surface's outward normal,
+        n·P <= 0); 'raw' keeps the underlying +Z-hemisphere convention. Default 'camera'.
     remove_edges : bool, optional
         If True, remove points at depth discontinuities. Default is False.
+    edge_z_thresh : float, optional
+        Sobel depth-gradient threshold (metres) for ``remove_edges``. Default is 0.03.
     depth_range : (min, max) tuple, optional
         Valid depth range. Default is (0.3, inf).
     depth_scale : float, optional
@@ -275,7 +273,7 @@ def depth_to_pc(
                                                              cx=depth_intrinsics[0, 2], cy=depth_intrinsics[1, 2])
 
     if remove_edges:
-        z_edges = normal_edges(np.asarray(depth), z_thresh=0.03)
+        z_edges = normal_edges(np.asarray(depth), z_thresh=edge_z_thresh)
         depth = depth.copy()
         depth[z_edges] = 0
 
@@ -310,6 +308,13 @@ def depth_to_pc(
         slow_normals = _normals_from_depth_grid(point_grid, ignore_mask)
         normals, slow_normals = normals.reshape([-1, 3]), slow_normals.reshape([-1, 3])
         normals[~ignore_mask.flatten()] = slow_normals[~ignore_mask.flatten()]
+        if orient_normals == 'camera':
+            # Orient toward the camera (origin, +Z forward): a visible surface's outward normal points
+            # back toward the camera, i.e. n·P <= 0. Flip the rest. Method-agnostic; supersedes the
+            # +Z-hemisphere convention above so callers don't need a downstream flip.
+            pts_flat = np.asarray(pc.points)
+            flip = (normals * pts_flat).sum(axis=-1) > 0
+            normals[flip] = -normals[flip]
         pc.normals = o3d.utility.Vector3dVector(normals.reshape([-1, 3]))
 
     if project_valid_depth_only:
