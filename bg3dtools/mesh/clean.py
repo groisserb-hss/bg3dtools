@@ -5,6 +5,8 @@ This module provides functions for cleaning and repairing triangle meshes,
 including making meshes manifold, filling holes, and removing degenerate faces.
 """
 
+import logging
+
 import igl
 from scipy.stats import mode
 import numpy as np
@@ -12,6 +14,8 @@ from typing import Tuple, Optional, Union
 import scipy.sparse as sparse
 
 from bg3dtools.mesh.utils import submesh, sample_E2V, mesh_volume, extract_manifold_patches
+
+log = logging.getLogger(__name__)
 
 
 def _mds_flatten(points: np.ndarray) -> np.ndarray:
@@ -54,6 +58,11 @@ __all__ = [
     "repair_with_model",
     "remove_large_faces",
     "fill_hole",
+    "fill_hole_fan",
+    "fill_hole_safe",
+    "smooth_face_mask",
+    "largest_component_mask",
+    "close_end_caps",
     "nonmanifold_edges",
     "nonmanifold_verts",
     "split_nonmanifold_verts",
@@ -242,6 +251,281 @@ def fill_hole(verts: np.ndarray, faces: np.ndarray, boundary_vidx: np.ndarray) -
     return faces
 
 
+def fill_hole_fan(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    boundary_vidx: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Close a boundary loop with a fan triangulation around a new centroid.
+
+    Adds one new vertex (the boundary centroid) and `len(boundary_vidx)` new
+    triangles, each spanning the centroid and a consecutive pair of
+    boundary vertices.
+
+    Topology guarantees: every new edge is either a boundary edge of the
+    input (now incident to exactly 1 pre-existing face + 1 new fan
+    triangle = manifold) or a centroid spoke (incident to exactly 2 new
+    fan triangles = manifold). Unlike `fill_hole`, which 2D-flattens the
+    boundary and Delaunay-triangulates, this never introduces a
+    non-manifold edge — making it safe to use inside an iterative repair
+    loop that would otherwise cycle on bad fills.
+
+    Triangle quality is poor for non-convex / non-planar boundaries (long
+    thin spokes), but for downstream boolean / inflation workflows where
+    only topology matters, this is the right primitive.
+
+    Parameters
+    ----------
+    verts : (nV, 3) ndarray
+        Vertex coordinates.
+    faces : (nF, 3) ndarray
+        Triangle indices.
+    boundary_vidx : (nB,) ndarray
+        Ordered boundary loop vertex indices (as returned by
+        `igl.boundary_loop` or `igl.all_boundary_loop`).
+
+    Returns
+    -------
+    verts : (nV + 1, 3) ndarray
+        Vertices with the centroid appended.
+    faces : (nF + nB, 3) ndarray
+        Faces with the fan triangles appended. Winding follows the order
+        of `boundary_vidx`, which preserves consistency with the existing
+        mesh orientation when the boundary came from libigl.
+    """
+    boundary_vidx = np.asarray(boundary_vidx).ravel()
+    n = boundary_vidx.shape[0]
+    if n < 3:
+        return verts, faces
+
+    # Append the boundary centroid; its index is c_idx in the new array.
+    centroid = verts[boundary_vidx].mean(axis=0, keepdims=True)
+    new_verts = np.vstack([verts, centroid])
+    c_idx = new_verts.shape[0] - 1
+
+    # n triangles: (c, v_{i+1}, v_i) wrapped circularly. The reversed
+    # order (v_{i+1}, v_i) is intentional: libigl's boundary loops are
+    # returned in the same direction the adjacent faces traverse the
+    # boundary edges, so a fan triangle wound (c, v_i, v_{i+1}) would
+    # traverse the shared edge in the same direction as the existing
+    # face — algebraically non-manifold. Reversing makes the fan
+    # triangle traverse the edge in the opposite direction, restoring
+    # manifold consistency.
+    v_a = boundary_vidx
+    v_b = np.roll(boundary_vidx, -1)
+    fan = np.column_stack([
+        np.full(n, c_idx, dtype=faces.dtype),
+        v_b.astype(faces.dtype),
+        v_a.astype(faces.dtype),
+    ])
+
+    new_faces = np.vstack([faces, fan])
+    return new_verts, new_faces
+
+
+def fill_hole_safe(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    boundary_vidx: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Fill a hole with Delaunay if it stays edge-manifold, else fan.
+
+    Delaunay (`fill_hole`) gives a higher-quality triangulation but on
+    noisy / non-planar boundaries can produce triangles that, when
+    stitched to the existing mesh, leave some edge incident to >2
+    faces — algebraically non-manifold. This wrapper validates the
+    Delaunay candidate by calling `igl.is_edge_manifold` and falls back
+    to `fill_hole_fan` whenever that check fails or whenever the input
+    itself was already non-edge-manifold (the latter case being one
+    where Delaunay's output can't be meaningfully validated).
+
+    `is_edge_manifold` is the correct gate here (counts faces per edge,
+    independent of winding direction). Winding inconsistencies that
+    `fill_hole` is prone to producing on libigl-ordered boundary loops
+    will be repaired by downstream `bfs_orient` and aren't a reason to
+    reject the Delaunay result.
+
+    Fan triangulation is manifold-preserving by construction (each new
+    edge is either a centroid spoke or an original boundary edge), so
+    the fallback is guaranteed safe — at the cost of one centroid
+    vertex and lower-quality triangles.
+
+    Always returns `(verts, faces)`. The Delaunay path returns `verts`
+    unchanged (Delaunay doesn't add vertices); the fan path appends
+    one centroid.
+
+    Parameters
+    ----------
+    verts : (nV, 3) ndarray
+        Vertex coordinates.
+    faces : (nF, 3) ndarray
+        Triangle indices.
+    boundary_vidx : (nB,) ndarray
+        Ordered boundary loop vertex indices.
+
+    Returns
+    -------
+    verts : (nV, 3) or (nV + 1, 3) ndarray
+        Original verts on the Delaunay path; centroid appended on the
+        fan path.
+    faces : (nF', 3) ndarray
+        Faces with the hole closed.
+    """
+    if igl.is_edge_manifold(faces):
+        try:
+            candidate = fill_hole(verts, faces, boundary_vidx)
+            if (candidate.shape[0] > faces.shape[0]
+                    and igl.is_edge_manifold(candidate)):
+                return verts, candidate
+        except Exception:
+            # Delaunay path raised (e.g., triangle library rejected the
+            # boundary polygon); fall through to fan.
+            pass
+    return fill_hole_fan(verts, faces, boundary_vidx)
+
+
+def smooth_face_mask(
+    faces: np.ndarray,
+    mask: np.ndarray,
+    n_iters: int = 5,
+    weight: float = 0.5,
+) -> np.ndarray:
+    """Diffusion-smooth a per-face mask and re-binarize.
+
+    Useful for cleaning up noisy per-face classifications (e.g. from a
+    ray-visibility test). Each iteration mixes each face's current value
+    with the mean of its edge-neighbors; after `n_iters` iterations the
+    result is thresholded at 0.5.
+
+    Missing neighbors (boundary edges, encoded as -1 by libigl) are
+    substituted with the face's own value, so boundary faces aren't biased
+    by the choice of mesh boundary.
+
+    Parameters
+    ----------
+    faces : (nF, 3) ndarray
+        Triangle indices.
+    mask : (nF,) bool or float ndarray
+        Initial per-face values; converted to float for smoothing.
+    n_iters : int
+        Number of diffusion iterations. Default 5.
+    weight : float
+        Per-iteration mix ratio: x_new = (1 - w) * x_old + w * mean(neighbors).
+        Default 0.5.
+
+    Returns
+    -------
+    smoothed : (nF,) bool ndarray
+        Cleaned mask, thresholded at 0.5.
+    """
+    TT, _ = igl.triangle_triangle_adjacency(faces)
+    self_idx = np.arange(len(faces))[:, None]
+    neigh = np.where(TT >= 0, TT, self_idx)
+
+    x = np.asarray(mask, dtype=np.float32)
+    for _ in range(n_iters):
+        neighbor_mean = x[neigh].mean(axis=1)
+        x = (1 - weight) * x + weight * neighbor_mean
+    return x > 0.5
+
+
+def largest_component_mask(faces: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Restrict a per-face mask to its largest edge-connected component.
+
+    Connectivity is defined among masked faces only (two masked faces are
+    connected iff they share an edge in the original mesh). Faces outside
+    `mask` are returned False.
+
+    Useful for removing stray classified faces that are spatially
+    disconnected from the dominant region.
+
+    Parameters
+    ----------
+    faces : (nF, 3) ndarray
+        Triangle indices of the full mesh.
+    mask : (nF,) bool ndarray
+        Selection mask.
+
+    Returns
+    -------
+    keep : (nF,) bool ndarray
+        Subset of `mask` containing only its largest connected component.
+        All-False if the input mask was all-False.
+    """
+    mask = np.asarray(mask, dtype=bool)
+    if not mask.any():
+        return mask.copy()
+
+    sub_idx = np.where(mask)[0]
+    labels = igl.facet_components(faces[sub_idx])
+    largest = int(np.bincount(labels).argmax())
+
+    out = np.zeros(len(faces), dtype=bool)
+    out[sub_idx[labels == largest]] = True
+    return out
+
+
+def close_end_caps(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    n_expected: int = 2,
+    rel_size_threshold: float = 0.05,
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    """Fan-fill the N longest boundary loops, treating them as expected open ends.
+
+    For surfaces with a known number of intentional open boundaries (e.g. 2
+    for an open cylinder), this closes exactly those loops by descending
+    length and leaves any remaining smaller boundaries untouched — those
+    are typically noise or small holes and are better handled by
+    downstream repair (e.g. `make_manifold`).
+
+    Uses `fill_hole_safe` for closure: each cap first tries the higher-
+    quality Delaunay triangulation, falling back to fan only if Delaunay
+    would introduce non-manifold edges. Either way, the closure is
+    manifold-consistent with the rest of the mesh.
+
+    A boundary loop is considered "large" if its length is at least
+    `rel_size_threshold` times the longest loop's length. The function
+    returns the total count of large loops so the caller can flag
+    unexpected topology (e.g. a fragmented surface that yielded more large
+    loops than expected).
+
+    Parameters
+    ----------
+    verts : (nV, 3) ndarray
+        Vertex coordinates.
+    faces : (nF, 3) ndarray
+        Triangle indices.
+    n_expected : int
+        Number of large loops to fill. Default 2 (cylinder end caps).
+    rel_size_threshold : float
+        Minimum loop length, relative to the longest loop, to count as
+        "large". Default 0.05.
+
+    Returns
+    -------
+    verts : (nV', 3) ndarray
+        Vertices, with one new centroid appended per filled loop.
+    faces : (nF', 3) ndarray
+        Faces with the `n_expected` longest large loops closed.
+    n_large_loops : int
+        Total number of large loops detected. Equals `n_expected` in the
+        happy case; differs when topology is unexpected.
+    """
+    loops = igl.all_boundary_loop(faces)
+    if not loops:
+        return verts, faces, 0
+
+    loops = sorted(loops, key=len, reverse=True)
+    longest_len = len(loops[0])
+    large_loops = [L for L in loops if len(L) >= rel_size_threshold * longest_len]
+
+    for loop in large_loops[:n_expected]:
+        verts, faces = fill_hole_safe(verts, faces, np.asarray(loop))
+
+    return verts, faces, len(large_loops)
+
+
 def nonmanifold_edges(faces: np.ndarray, return_counts: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
       Inputs:
@@ -372,16 +656,30 @@ def make_manifold(
     ftex: Optional[np.ndarray] = None,
     suspect_v: Optional[np.ndarray] = None,
     double_check: bool = False,
-    area_thresh: float = 0.000002
+    area_thresh: float = 0.000002,
+    max_iters: int = 10,
 ) -> Union[Tuple[np.ndarray, np.ndarray],
            Tuple[np.ndarray, np.ndarray, np.ndarray],
            Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    """
-    Edit mesh to create a manifold watertight volume.
+    """Convert to a manifold watertight mesh via fan-triangulated hole filling.
 
-    Iteratively repairs the mesh by splitting non-manifold vertices,
-    removing faces attached to non-manifold edges, filling holes,
-    and collapsing small triangles.
+    Repairs the input by iteratively (a) restricting to the largest
+    manifold patch, (b) splitting non-manifold vertices, (c) removing
+    faces incident to non-manifold edges, and (d) fan-filling every
+    boundary loop. Fan triangulation is provably manifold-preserving
+    (each new edge is incident to exactly two of the new fan triangles,
+    or one fan triangle + one pre-existing boundary face), so step (d)
+    cannot feed step (c) on the next iteration — breaking the fill /
+    remove cycle that a Delaunay-based hole fill would cause on noisy
+    inputs.
+
+    Once the loop converges to a closed, edge-manifold, vertex-manifold
+    state, `collapse_small_triangles` runs *once* to clean up thin
+    slivers introduced by fan triangulation. Any new boundaries created
+    by the collapse are fan-filled in a single follow-up pass; the final
+    state is re-verified. The function raises `RuntimeError` if the
+    output cannot be brought to a manifold + closed state — no silent
+    non-manifold fallback.
 
     Parameters
     ----------
@@ -390,140 +688,188 @@ def make_manifold(
     faces : (nF, 3) ndarray
         Triangle indices.
     vtex : (nV, C) ndarray, optional
-        Per-vertex texture/attribute data to propagate through repairs.
+        Per-vertex attributes; propagated through repairs. For each
+        added fan centroid, the new vertex's attribute is the mean of
+        the boundary vertices' attributes.
     ftex : (nF, C) ndarray, optional
-        Per-face texture/attribute data to propagate through repairs.
+        Per-face attributes; propagated through repairs. For each added
+        fan triangle, the new row is NaN (synthetic face).
     suspect_v : (nL,) ndarray, optional
-        Indices of vertices suspected to be non-manifold.
+        Indices of vertices suspected to be non-manifold; used to scope
+        the first `split_nonmanifold_verts` pass. Subsequent iterations
+        re-scan all vertices.
     double_check : bool, optional
-        If True, verify manifoldness after repair. Default is False.
+        If True, assert manifoldness after repair. Default False.
     area_thresh : float, optional
-        Threshold for collapsing small triangles. Default is 0.000002.
+        Area threshold (relative to bbox-diagonal²) below which the
+        post-loop `collapse_small_triangles` pass collapses thin
+        slivers. Default 2e-6.
+    max_iters : int, optional
+        Convergence iteration cap. Default 10. Typical inputs converge
+        in 1–2; the cap exists to fail fast on truly pathological
+        inputs.
 
     Returns
     -------
     verts : (nV', 3) ndarray
-        Repaired vertices.
     faces : (nF', 3) ndarray
-        Repaired faces.
-    vtex : (nV', C) ndarray
-        Updated vertex attributes (if vtex was provided).
-    ftex : (nF', C) ndarray
-        Updated face attributes (if ftex was provided).
+    vtex : (nV', C) ndarray, only if `vtex` was provided.
+    ftex : (nF', C) ndarray, only if `ftex` was provided.
 
     Raises
     ------
     RuntimeError
-        If repair fails to converge after 100 iterations.
+        If the mesh cannot be brought to a manifold + closed state
+        within `max_iters` iterations, or if the post-loop collapse
+        breaks manifoldness in a way that one repair pass cannot fix.
     """
-    # print('Edit mesh to manifold watertight volume')
-    # extract largest contiguous edge-manifold patch
-    if hasattr(igl, 'extract_manifold_patches'):
-        p = igl.extract_manifold_patches(faces)
-    elif hasattr(igl, 'facet_components'):
-        p = igl.facet_components(faces)
-    elif hasattr(igl, 'connected_components'):
-        f_labels = igl.connected_components(faces)
-        n_patches = int(f_labels.max()) + 1
-        p = (n_patches, f_labels)
-    else:
-        raise RuntimeError('unable to extract manifold patches')
 
-    if p[0] > 1:
+    def _largest_patch(verts, faces, vtex, ftex):
+        n_patches, labels = extract_manifold_patches(faces)
+        if n_patches > 1:
+            keep = labels == mode(labels)[0]
+            verts, faces, f_idx, v_idx = submesh(verts, faces, keep)
+            if vtex is not None:
+                vtex = vtex[v_idx]
+            if ftex is not None:
+                ftex = ftex[f_idx]
+        return verts, faces, vtex, ftex
 
-        verts, faces, f_idx, v_idx = submesh(verts, faces, p[1] == mode(p[1])[0])
-        ftex = None if ftex is None else ftex[f_idx]
-        vtex = None if vtex is None else vtex[v_idx]
-        # print('  largest manifold patch: %conv_channels v, %conv_channels f' % (verts.shape[0], faces.shape[0]))
+    def _is_manifold_and_closed(faces):
+        return (not igl.all_boundary_loop(faces)
+                and igl.is_edge_manifold(faces)
+                and nonmanifold_verts(faces)[0].size == 0)
 
-    ii = 0
-    # loop until faces don't change
-    altered = True
-    while altered:
-        altered = False
-        # print('  iteration %conv_channels' % ii)
+    def _fill_all_boundaries(verts, faces, vtex, ftex):
+        """Close every boundary loop via fill_hole_safe; propagate vtex/ftex.
 
-        # split nonmanifold vertices
-        nV = verts.shape[0]
+        fill_hole_safe may take the Delaunay path (no new vertex, adds
+        ~len(loop)-2 faces) or the fan path (adds 1 centroid + len(loop)
+        faces). vtex/ftex are extended by inspecting the actual change in
+        verts.shape[0] and faces.shape[0] after the call, so the same
+        helper handles both paths.
+        """
+        for loop in igl.all_boundary_loop(faces):
+            loop = np.asarray(loop)
+            # Cache the centroid attribute now (the fan path would consume it
+            # before vtex grows). Delaunay path simply ignores it.
+            staged_centroid_attr = (
+                vtex[loop].mean(axis=0, keepdims=True).astype(vtex.dtype)
+                if vtex is not None else None
+            )
+            nV_before, nF_before = verts.shape[0], faces.shape[0]
+            verts, faces = fill_hole_safe(verts, faces, loop)
+            added_verts = verts.shape[0] - nV_before
+            added_faces = faces.shape[0] - nF_before
+            if vtex is not None and added_verts > 0:
+                vtex = np.vstack([vtex, staged_centroid_attr])
+            if ftex is not None and added_faces > 0:
+                ftex = np.vstack([
+                    ftex,
+                    np.full((added_faces, ftex.shape[1]), np.nan, dtype=ftex.dtype),
+                ])
+        return verts, faces, vtex, ftex
+
+    # Initial: keep only the largest manifold patch.
+    verts, faces, vtex, ftex = _largest_patch(verts, faces, vtex, ftex)
+
+    # Main repair loop: split / remove-bad / fan-fill / orient / dedup.
+    for _it in range(max_iters):
+        # Split non-manifold vertices. `suspect_v` is honored on the first
+        # iteration (per caller hint); subsequent iters re-scan all verts.
         split = split_nonmanifold_verts(verts, faces, suspect_v, vtex=vtex)
         verts, faces = split[0], split[1]
-        vtex = None if vtex is None else split[2]
-        if verts.shape[0] > nV:
-            altered = True
-            # print('    split %conv_channels non-manifold vertices' % (verts.shape[0] - nV))
+        if vtex is not None:
+            vtex = split[2]
+        suspect_v = None
 
-        # remove faces attached to non-manifold edges
-        bad_edges = nonmanifold_edges(faces)
-        if bad_edges.size > 0:
-            altered = True
-            # print('    removing faces attached to %conv_channels bad edges' % bad_edges.shape[0])
-            fidx = np.logical_not(np.any(np.isin(faces, bad_edges), axis=1))
-            verts, faces, f_idx, v_idx = submesh(verts, faces, fidx)
-            ftex = None if ftex is None else ftex[f_idx]
-            vtex = None if vtex is None else vtex[v_idx]
+        # Fix winding BEFORE testing for non-manifold edges. The
+        # `nonmanifold_edges` helper flags both ">2-incident" edges
+        # (true non-manifoldness) AND winding-inconsistent edges
+        # (recoverable by reorientation). Without this step, a fresh
+        # Delaunay fill — wound in the same direction as the existing
+        # boundary traversal — would flag every boundary edge of the
+        # fill, prompting catastrophic face removal.
+        oriented, _ = igl.bfs_orient(faces)
+        faces = np.asarray(oriented, dtype=faces.dtype)
 
-        # fill a single hole
-        boundary_vidx = igl.boundary_loop(faces)
-        if boundary_vidx.size >= 3:
-            altered = True
-            suspect_v = boundary_vidx
-            faces = fill_hole(verts, faces, boundary_vidx)
-            # print('    filled boundary loop of %conv_channels vertices' % len(boundary_vidx))
-        else:
-            suspect_v = []
+        # Now remove faces incident to truly non-manifold edges
+        # (>2-incident — winding inconsistencies are gone after orient).
+        bad = nonmanifold_edges(faces)
+        if bad.size > 0:
+            keep = np.logical_not(np.any(np.isin(faces, bad), axis=1))
+            verts, faces, f_idx, v_idx = submesh(verts, faces, keep)
+            if vtex is not None:
+                vtex = vtex[v_idx]
+            if ftex is not None:
+                ftex = ftex[f_idx]
 
-        # fix winding/normals
-        f, c = igl.bfs_orient(faces)
-        if np.any(faces != f):
-            altered = True
-            faces = f
-            # print('    corrected winding')
+        # Close every boundary loop (Delaunay where it keeps things
+        # edge-manifold, else fan). The fill may introduce
+        # winding-inconsistent edges that the next iteration's
+        # bfs_orient will clean up.
+        verts, faces, vtex, ftex = _fill_all_boundaries(verts, faces, vtex, ftex)
 
-        # remove duplicate faces
+        # Re-orient again so the convergence check below sees a
+        # consistently-wound mesh.
+        oriented, _ = igl.bfs_orient(faces)
+        faces = np.asarray(oriented, dtype=faces.dtype)
+
+        # Drop duplicate faces.
         ff, fidx = igl.resolve_duplicated_faces(faces)
-        num_removed = len(faces) - len(ff)
-        if num_removed > 0:
-            altered = True
-            # print('    removed %conv_channels duplicate faces' % num_removed)
+        if len(faces) > len(ff):
             verts, faces, f_idx, v_idx = submesh(verts, faces, fidx)
-            ftex = None if ftex is None else ftex[f_idx]
-            vtex = None if vtex is None else vtex[v_idx]
-            suspect_v = np.where(np.isin(v_idx, suspect_v))[0]
+            if vtex is not None:
+                vtex = vtex[v_idx]
+            if ftex is not None:
+                ftex = ftex[f_idx]
 
-        # collapse small triangles
-        a = (np.min(igl.doublearea(verts, faces)) / bounding_box_diagonal(verts)**2) / 2
-        if a < area_thresh:
-            altered = True
-            f_map = {tuple(f): idx for idx, f in enumerate(faces)}
-            ff = igl.collapse_small_triangles(verts, faces, area_thresh)
-            ftex = None if ftex is None else ftex[[f_map[tuple(fidx)] for fidx in ff]]
+        converged = _is_manifold_and_closed(faces)
+        if not converged and _it >= 2:
+            # Diagnostic for pathological inputs (most converge in 1-2 iters).
+            log.info(
+                'make_manifold slow to converge: iter %d/%d, nV=%d, nF=%d, '
+                'nonmanifold_edges=%d',
+                _it + 1, max_iters, len(verts), len(faces),
+                nonmanifold_edges(faces).size,
+            )
+        if converged:
+            break
+    else:
+        raise RuntimeError(
+            f'make_manifold did not converge after {max_iters} iterations'
+        )
 
-            # print('    collapsed %conv_channels small triangles' % (faces.shape[0] - ff.shape[0]))
-            verts, faces, i, j = igl.remove_unreferenced(verts, ff)
-            ftex = None if ftex is None else i[ftex]
-            vtex = None if vtex is None else vtex[j]
-            suspect_v = np.where(np.isin(j, suspect_v))[0]
+    # Post-loop: a single pass of small-triangle collapse, then one
+    # follow-up fan-fill in case collapse created new boundaries.
+    a = (np.min(igl.doublearea(verts, faces)) / bounding_box_diagonal(verts) ** 2) / 2
+    if a < area_thresh:
+        f_map = {tuple(f): idx for idx, f in enumerate(faces)}
+        collapsed = igl.collapse_small_triangles(verts, faces, area_thresh)
+        if ftex is not None:
+            ftex = ftex[[f_map[tuple(fc)] for fc in collapsed]]
+        verts, faces, i, j = igl.remove_unreferenced(verts, collapsed)
+        if vtex is not None:
+            vtex = vtex[j]
+        # Collapse may have opened new tiny boundaries; close them once.
+        verts, faces, vtex, ftex = _fill_all_boundaries(verts, faces, vtex, ftex)
+        if not _is_manifold_and_closed(faces):
+            raise RuntimeError(
+                'make_manifold: post-collapse repair could not restore '
+                'manifold + closed state'
+            )
 
-        ii += 1
-        if ii > 100:
-            raise RuntimeError('Failed to converge after 100 iterations')
-
-    # # for debugging
     if double_check:
         assert igl.is_edge_manifold(faces)
         assert nonmanifold_verts(faces)[0].size == 0
 
-    p = extract_manifold_patches(faces)
-    if p[0] > 1:
+    # Drop any disjoint debris introduced by repairs.
+    verts, faces, vtex, ftex = _largest_patch(verts, faces, vtex, ftex)
 
-        verts, faces, f_idx, v_idx = submesh(verts, faces, p[1] == mode(p[1])[0])
-        ftex = None if ftex is None else ftex[f_idx]
-        vtex = None if vtex is None else vtex[v_idx]
-
+    # Flip if inside-out.
     if mesh_volume(verts, faces) < 0:
         faces = faces[:, [0, 2, 1]]
 
-    # print('  return mesh with %conv_channels v, %conv_channels f' % (verts.shape[0], faces.shape[0]))
     if vtex is None and ftex is None:
         return verts, faces
     elif ftex is None:
@@ -532,4 +878,6 @@ def make_manifold(
         return verts, faces, ftex
     else:
         return verts, faces, vtex, ftex
+
+
 
