@@ -84,7 +84,13 @@ def load_video(video_path: str) -> List[np.ndarray]:
     """
     reader = imageio.get_reader(str(video_path))
     try:
-        frames = list(reader)  # RGB uint8
+        # NB: do NOT use `list(reader)` — imageio's ffmpeg reader reports get_length()=inf,
+        # so list() preallocates sys.maxsize (length_hint = 2**63-1) and raises MemoryError
+        # regardless of free RAM. Iterating with append reads sequentially and stops at the
+        # true frame count.
+        frames = []
+        for frame in reader:  # RGB uint8
+            frames.append(frame)
     finally:
         reader.close()
     return frames
