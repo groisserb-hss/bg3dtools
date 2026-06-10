@@ -5,10 +5,11 @@ This module provides functions for creating publication-quality
 statistical plots including Bland-Altman plots.
 """
 
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Union
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+from matplotlib.transforms import blended_transform_factory
 
 mpl.rcParams.update({
     "font.family": "serif",
@@ -30,7 +31,7 @@ def bland_altman(
         show_proportional_bias: bool = True,
         loa_factor: float = 1.96,
         annotate: bool = True,
-        annotate_position: str = "auto",
+        annotate_position: Union[str, float] = "auto",
 ) -> Tuple[plt.Figure, plt.Axes, Dict[str, float]]:
     """
     Create a Bland–Altman plot comparing two sets of measurements.
@@ -60,10 +61,13 @@ def bland_altman(
         Multiplier for limits of agreement (default 1.96 ≈ 95% LoA).
     annotate : bool
         If True, annotate mean diff and LoA on the plot.
-    annotate_position : {"auto", "top", "bottom"}
+    annotate_position : {"auto", "top", "bottom", "inside"} or float
         Vertical placement of the annotation block. "auto" (default) picks
         the side opposite the bias — bottom if mean_diff >= 0, top otherwise —
-        so the text lands in the empty half of the plot.
+        so the text lands in the empty half of the plot. "inside" anchors
+        the text just below the upper LoA line (useful when one of the LoA
+        bounds is close to the axes edge). A float in [0, 1] is interpreted
+        as an axes y-fraction for explicit placement.
 
     Returns
     -------
@@ -191,19 +195,33 @@ def bland_altman(
             # Place opposite the bias: positive bias clusters data upward,
             # so the bottom is empty (and vice versa).
             position = "bottom" if mean_diff >= 0 else "top"
-        if position == "bottom":
+
+        # Default transform: y in axes fraction.
+        trans = ax.transAxes
+        if isinstance(position, (int, float)) and not isinstance(position, bool):
+            if not 0.0 <= float(position) <= 1.0:
+                raise ValueError(
+                    f"annotate_position float must be in [0, 1]; got {position!r}"
+                )
+            text_y = float(position)
+            va = "top" if text_y > 0.5 else "bottom"
+        elif position == "bottom":
             text_y, va = 0.02, "bottom"
         elif position == "top":
             text_y, va = 0.98, "top"
+        elif position == "inside":
+            # Anchor text top to the upper LoA line, in data coords.
+            text_y, va = loa_upper, "top"
+            trans = blended_transform_factory(ax.transAxes, ax.transData)
         else:
             raise ValueError(
-                "annotate_position must be 'auto', 'top', or 'bottom'; "
-                f"got {annotate_position!r}"
+                "annotate_position must be 'auto', 'top', 'bottom', 'inside', "
+                f"or a float in [0, 1]; got {annotate_position!r}"
             )
 
         ax.text(
             0.02, text_y, "\n".join(lines),
-            transform=ax.transAxes,
+            transform=trans,
             va=va, ha="left"
         )
 
