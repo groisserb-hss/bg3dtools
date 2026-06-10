@@ -23,7 +23,6 @@ from bg3dtools.mesh.registration import affine_ICP, nonrigid_ICP
 from spectral_match.correspondence.product_manifold_filters import product_manifold_filter as pmf
 from spectral_match.tools.mesh_class import Mesh
 from spectral_match.correspondence.feature_descriptors import DescriptorClass
-from spectral_match.correspondence.deep_functional_maps.operations import ResidualNet
 from spectral_match.correspondence.match import compute_correspondence
 from spectral_match import default_sig_config, default_match_config
 
@@ -128,6 +127,7 @@ class FunctionalMapper:
             self.load_resnet(weight_file)
 
     def load_resnet(self, weight_file):
+        from spectral_match.correspondence.deep_functional_maps.operations import ResidualNet
         self.resnet = ResidualNet(self.num_layers, self.num_signatures, training=False)
         self.resnet.load_weights(weight_file).expect_partial()
 
