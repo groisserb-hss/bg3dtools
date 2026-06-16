@@ -370,47 +370,15 @@ def anterior_camera(v):
 def render_mesh_to_image(geom, lookat, eye, up, width=400, height=400, fov=45.0):
     """Render an Open3D geometry to a numpy RGB uint8 image.
 
-    Tries OffscreenRenderer (headless) first, falls back to legacy Visualizer.
+    COMPAT WRAPPER: delegates to the unified renderer (``bg3dtools.render.scan.render_frame``) so the
+    offscreen+legacy backend logic lives in ONE place (it used to be duplicated here and in humanfit's
+    render_scan). ``geom`` is an already-built o3d geometry, passed through as a raw 'mesh'-shaded spec.
+    Signature + return type unchanged.
     """
-    try:
-        return _render_offscreen(geom, lookat, eye, up, width, height, fov)
-    except Exception:
-        return _render_legacy(geom, lookat, eye, up, width, height)
-
-
-_offscreen_cache = {}  # (width, height) -> OffscreenRenderer
-
-
-def _render_offscreen(geom, lookat, eye, up, width, height, fov):
-    import open3d.visualization.rendering as rendering
-    key = (width, height)
-    if key not in _offscreen_cache:
-        _offscreen_cache[key] = rendering.OffscreenRenderer(width, height)
-    renderer = _offscreen_cache[key]
-    renderer.scene.set_background(np.array([1, 1, 1, 1], dtype=np.float32))
-    mat = rendering.MaterialRecord()
-    mat.shader = "defaultLit"
-    renderer.scene.add_geometry("mesh", geom, mat)
-    renderer.setup_camera(fov, lookat, eye, up)
-    img = np.asarray(renderer.render_to_image()).copy()
-    renderer.scene.clear_geometry()
-    return img
-
-
-def _render_legacy(geom, lookat, eye, up, width, height):
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(width=width, height=height, visible=False)
-    vis.get_render_option().background_color = np.array([1, 1, 1])
-    vis.add_geometry(geom)
-    ctr = vis.get_view_control()
-    ctr.set_lookat(lookat)
-    ctr.set_front(eye - lookat)
-    ctr.set_up(up)
-    vis.poll_events()
-    vis.update_renderer()
-    img = np.asarray(vis.capture_screen_float_buffer(do_render=True))
-    vis.destroy_window()
-    return (np.clip(img, 0, 1) * 255).astype(np.uint8)
+    from .scan import render_frame, CameraParams, _RawGeom
+    cam = CameraParams(lookat=np.asarray(lookat, np.float32), eye=np.asarray(eye, np.float32),
+                       up=np.asarray(up, np.float32), fov=float(fov))
+    return render_frame([_RawGeom(geom, hint="mesh")], cam, width=width, height=height)
 
 
 def mesh_to_wireframe(
