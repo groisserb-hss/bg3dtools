@@ -86,3 +86,14 @@ except ImportError:
     render_mesh_to_image = None
     overhead_camera = None
     anterior_camera = None
+
+# The unified diagnostic renderer (was humanfit.utils.render). scan.py imports open3d lazily, so this
+# import only needs numpy — safe even without the `viz` extra.
+from .scan import (  # noqa: E402
+    Wireframe, PointCloudSpec, Skeleton, Floor, CameraFrustum, Mesh, Lines, _RawGeom,
+    GeometrySpec, CameraParams, RenderStyle, RenderOptions, render_scan, render_frame,
+)
+__all__.extend([
+    "Wireframe", "PointCloudSpec", "Skeleton", "Floor", "CameraFrustum", "Mesh", "Lines",
+    "GeometrySpec", "CameraParams", "RenderStyle", "RenderOptions", "render_scan", "render_frame",
+])
