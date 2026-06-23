@@ -54,10 +54,14 @@ def read_data(strayscanner_folder: str) -> dict:
         Keys: 'path', 'intrinsics', 'poses', 'depth_frames', 'mp4_file'.
     """
     intrinsics = np.loadtxt(os.path.join(strayscanner_folder, 'camera_matrix.csv'), delimiter=',')
-    odometry = np.loadtxt(os.path.join(strayscanner_folder, 'odometry.csv'), delimiter=',', skiprows=1)
+    # usecols=range(9) = timestamp,frame,x,y,z,qx,qy,qz,qw — the only columns used below. Robust to newer
+    # Stray exports that append fx,fy,cx,cy,distortion_center_x/y (the distortion cols are often empty,
+    # which crashes the float parse, and their presence would otherwise widen the quaternion slice).
+    odometry = np.loadtxt(os.path.join(strayscanner_folder, 'odometry.csv'), delimiter=',', skiprows=1,
+                          usecols=range(9))
     timestamps = odometry[:, 0].tolist()
     positions = odometry[:, 2:5]       # (N, 3)
-    quaternions = odometry[:, 5:]      # (N, 4)
+    quaternions = odometry[:, 5:9]     # (N, 4): qx, qy, qz, qw
     rotations = Rotation.from_quat(quaternions).as_matrix()  # (N, 3, 3)
 
     N = len(odometry)
@@ -68,8 +72,11 @@ def read_data(strayscanner_folder: str) -> dict:
     fps = 1.0 / np.mean(np.diff(timestamps))
     depth_dir = os.path.join(strayscanner_folder, 'depth')
 
-    depth_frames = [os.path.join(depth_dir, p) for p in sorted(os.listdir(depth_dir))]
-    depth_frames = [f for f in depth_frames if '.npy' in f or '.png' in f]
+    # Skip macOS AppleDouble sidecars (._*) that SMB/CIFS mounts (e.g. /Volumes/clam) write next to each
+    # frame — they share the .png/.npy suffix, so loading them as images crashes and they double the frame
+    # count vs the poses. Match the extension at the END of the name, not anywhere in it.
+    depth_frames = [os.path.join(depth_dir, p) for p in sorted(os.listdir(depth_dir))
+                    if not p.startswith('.') and (p.endswith('.png') or p.endswith('.npy'))]
 
     rgb_file = os.path.join(strayscanner_folder, 'rgb.mp4')
     assert os.path.isfile(rgb_file), 'missing expected video file %s' % rgb_file

@@ -520,6 +520,80 @@ def ordered_edges(faces: np.ndarray) -> np.ndarray:
     return edges[idx, :]
 
 
+def internal_edges(verts: np.ndarray, faces: np.ndarray, vweights: np.ndarray) -> np.ndarray:
+    """Build segment-restricted internal "strut" edges for shape regularization.
+
+    For each vertex, adds **one** edge to the partner vertex that maximizes a
+    cross-body, same-segment, far, spread-out criterion::
+
+        optimality = ang * segweight * d * exp(-hitcount)
+
+    so the chosen partner is:
+
+    - **across the body interior** -- ``ang = 1 - cos(dir_to_partner, vertex_normal)``
+      is largest when the partner lies opposite the outward normal (a strut
+      that spans the cavity rather than hugging the surface);
+    - **in the same body segment** -- ``segweight = vweights @ vweights[v]`` (the
+      blend-weight dot product) is high only when both vertices are driven by
+      the same joints, so e.g. CHEST-CHEST struts form but never CHEST-HAND;
+    - **far** -- ``d`` is the distance to the partner normalized by the mean
+      vertex distance (long struts span a segment);
+    - **spread out** -- ``exp(-hitcount)`` discourages many struts landing on
+      the same partner.
+
+    Stacked onto the face edges and fed to :func:`nonrigid_ICP` as extra
+    regularization edges, these struts resist *segment-level shape change*
+    (cross-section collapse / a limb being yanked toward stray points) while
+    leaving the parametric body's articulation free.
+
+    Parameters
+    ----------
+    verts : (nV, 3) ndarray
+        Template (rest-pose) vertex positions.
+    faces : (nF, 3) ndarray
+        Triangle indices (used for per-vertex normals).
+    vweights : (nV, nJ) ndarray
+        Per-vertex linear-blend-skinning weights; their pairwise dot product
+        defines body-segment co-membership.
+
+    Returns
+    -------
+    edges : (nV, 2) int32 ndarray
+        One internal edge ``[v, partner]`` per vertex.
+
+    Notes
+    -----
+    Ported from the body-model coregistration toolbox; O(nV^2) and computed
+    once on the rest pose (the resulting edge *list* is reused every frame).
+    """
+    vnormals = per_vertex_normals(verts, faces)
+    inner_edges = np.empty([len(verts), 2], dtype=np.int32)
+    hitcount = np.zeros(len(verts))
+
+    for vv in range(len(verts)):
+        # angle between direction-to-vertex and this vertex's normal
+        vecs = verts - verts[vv]
+        vecs = vecs / (np.linalg.norm(vecs, axis=-1, keepdims=True) + 1e-6)
+        ang = 1 - np.sum(vecs * vnormals[vv], axis=-1)  # large => across the body
+        ang[vv] = -1  # don't connect to self
+
+        # distance from vertex (normalized by mean), prefers far partners
+        d = np.linalg.norm(verts - verts[vv:vv + 1], axis=-1)
+        d = d / np.mean(d)
+
+        # restrict search to vertices in the same body segment
+        segweight = np.dot(vweights, vweights[vv])
+
+        optimality = ang * segweight * d * np.exp(-hitcount)
+
+        paired_v = int(np.argmax(optimality))
+        inner_edges[vv] = [vv, paired_v]
+        hitcount[paired_v] += 1
+        hitcount[vv] += 1
+
+    return inner_edges
+
+
 def sample_E2V(edges, verts=None, nV=None):
     """Build a sparse (nV, nE) matrix mapping edges to incident vertices.
 

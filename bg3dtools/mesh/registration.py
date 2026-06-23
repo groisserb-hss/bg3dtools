@@ -51,10 +51,12 @@ def nonrigid_ICP(
     step_size: float = 1.0,
     discrete: bool = False,
     edges: Optional[np.ndarray] = None,
+    edge_weights: Optional[np.ndarray] = None,
     landmark_targets: Optional[np.ndarray] = None,
     landmark_regressor: Optional[sparse.spmatrix] = None,
     landmark_weight: float = 0.0,
     landmark_confidence: Optional[np.ndarray] = None,
+    cosine_data_weight: bool = False,
 ) -> Tuple[np.ndarray, float]:
     """
     Non-rigid ICP registration of a point cloud to a template mesh.
@@ -87,14 +89,22 @@ def nonrigid_ICP(
         Default is False.
     edges : (nE, 2) ndarray, optional
         Mesh edge indices. Computed from faces if not provided.
+    edge_weights : (nE,) ndarray, optional
+        Per-edge regularization weights. If given, used as-is (length must
+        match ``edges``), letting the caller control the relative strength of
+        different edge groups (e.g. face edges vs. internal struts). If None
+        (default), every edge gets the uniform weight ``model_weight / nE`` —
+        reproducing the original behavior exactly.
     landmark_targets : (nL, 3) ndarray, optional
-        Target 3D landmark positions for sparse correspondences.
+        Target 3D positions to anchor toward. Treated as known anchors, so the
+        term is a plain **L2** pull (constant weight, no robust down-weighting).
     landmark_regressor : (nL, nV) sparse matrix, optional
-        Maps mesh vertices to landmark positions (e.g. SMPL-to-BlazePose).
+        Maps mesh vertices to landmark positions (e.g. SMPL-to-BlazePose, or an
+        identity to anchor each vertex to its own target position).
     landmark_weight : float, optional
-        Weight for landmark correspondence term. Default is 0.0 (disabled).
+        Weight for the L2 anchor term. Default is 0.0 (disabled).
         At ``landmark_weight=1.0``, total landmark weight sums to ~0.5
-        (scan weights sum to ~1.0).
+        (scan weights sum to ~1.0); per-anchor weight scales as ``1/(2*nL)``.
     landmark_confidence : (nL,) ndarray, optional
         Per-landmark confidence in [0, 1]. Defaults to 1 for all landmarks.
 
@@ -131,19 +141,26 @@ def nonrigid_ICP(
         edges = ordered_edges(faces)
     # edge_len = np.mean(np.linalg.norm(modelV[edges[:, 0]] - modelV[edges[:, 1]], axis=-1))
     nE = edges.shape[0]
+    if edge_weights is not None:
+        edge_weights = np.asarray(edge_weights, dtype=np.float64)
+        assert edge_weights.shape == (nE,), \
+            'edge_weights must have one weight per edge (%d), got %s' % (nE, edge_weights.shape)
     K = faces.shape[0] * 3
     nS = points.shape[0]
 
-    # Precompute landmark base weights (GM modulation applied per iteration)
+    # Precompute landmark weights.  Landmarks are ANCHORS — the target is a position you KNOW
+    # (e.g. a boundary vertex pinned to a tidal-average location, or a vertex held near its init),
+    # so the loss is plain L2 with a CONSTANT weight (no robust/Geman-McClure down-weighting; that
+    # would weaken exactly the anchors that drift, defeating the purpose).  The robust kernel stays on
+    # the *scan* data term only.
     use_landmarks = (landmark_weight > 0 and landmark_targets is not None
                      and landmark_regressor is not None)
     if use_landmarks:
         nL = landmark_targets.shape[0]
         if landmark_confidence is None:
             landmark_confidence = np.ones(nL, dtype=np.float64)
-        # At landmark_weight=1, total landmark weight sums to ~0.5
-        # (scan sums to ~1.0).  GM factor applied per iteration.
-        lm_w_base = (landmark_weight * landmark_confidence / (2 * nL)).astype(np.float64)
+        # At landmark_weight=1, total landmark weight sums to ~0.5 (scan sums to ~1.0).
+        lm_w = lm_w_base = (landmark_weight * landmark_confidence / (2 * nL)).astype(np.float64)
         lm_regressor = landmark_regressor.astype(np.float64)
         lm_targets = landmark_targets.astype(np.float64)
     else:
@@ -198,15 +215,27 @@ def nonrigid_ICP(
         smoothV = modelV + smooth_disp
 
         # Uniform edge weight — smoothed targets handle rotation correctly,
-        # so no need for distortion-adaptive weighting.
-        edge_weight = np.full(nE, model_weight / nE)
+        # so no need for distortion-adaptive weighting.  A caller-supplied
+        # edge_weights overrides this (e.g. to weight internal struts
+        # separately from face edges without diluting either group).
+        edge_weight = np.full(nE, model_weight / nE) if edge_weights is None else edge_weights
 
-        if discrete or pt_normals is None:
-            # for discrete scan matching, similarity of normals has already been accounted for
-            # in the nearest neighbor search
+        if pt_normals is None:
             nd = np.ones_like(d2)
+        elif discrete and not cosine_data_weight:
+            # default discrete path: normal similarity already used in the 6D NN search; no extra weight.
+            nd = np.ones_like(d2)
+        elif discrete and cosine_data_weight:
+            # OPT-IN: even after the 6D match, down-weight correspondences whose scan normal disagrees
+            # with the matched surface — a "toxic" point (e.g. arm/background forced onto the wrong
+            # surface) contributes little no matter how good its least-bad match was. Raised-cosine
+            # (Hann) taper over the normal-disagreement angle θ ∈ [0°, 135°]: ½(1+cos(θ·4/3)),
+            # flat-zero past 135°. → 1 at 0°, 0.75 at 45°, 0.25 at 90°, ~0 at 120°.
+            cos = np.clip(np.sum(subnormals * face_normals[fidx], axis=1), -1.0, 1.0)
+            theta = np.arccos(cos)
+            nd = 0.5 * (1.0 + np.cos(np.minimum(theta * (4.0 / 3.0), np.pi)))
         else:
-            # weight scan distance by cosine similarity (between scan pts and matching surface points)
+            # continuous (surface_match) path with normals — original gentle cosine weight.
             nd = np.sum(subnormals * face_normals[fidx], axis=1) / 4 + .75
 
         # Geman-McClure robust weighting: w² * d² = d²/(rad²+d²).
@@ -215,11 +244,8 @@ def nonrigid_ICP(
         bcmap = bc2sparse(faces, fidx, bc)
         # scan_w *= bcmap @ vert_w
 
-        # GM-modulate landmark weights (sigma = 2*rad, frozen denominator)
-        if use_landmarks:
-            current_lm = lm_regressor @ fittedV
-            lm_d2 = np.sum((current_lm - lm_targets) ** 2, axis=1)
-            lm_w = lm_w_base * np.sqrt(rad**2 / (rad**2 + lm_d2))
+        # Landmark weight is constant L2 (lm_w = lm_w_base, set once above) — no per-iteration
+        # robust re-weighting; the anchor pull grows with displacement so anchors actually hold.
 
         # build new mesh based on closest points from scan to mesh
         newV = fit_vertices(fittedV, faces, smoothV, fidx, bc, subscan, edges, scan_w, edge_weight,
