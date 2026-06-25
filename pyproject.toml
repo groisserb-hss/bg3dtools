@@ -10,7 +10,7 @@ requires-python = ">=3.9"
 dependencies = [
     "numpy",
     "scipy",
-    "libigl",
+    "libigl==2.5.0",
     "Pillow",
     "imageio",
 ]
