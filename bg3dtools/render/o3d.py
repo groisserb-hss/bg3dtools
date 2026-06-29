@@ -349,7 +349,7 @@ def overhead_camera(v):
     Returns (lookat, eye, up) for use with render_mesh_to_image.
     """
     center = v.mean(axis=0)
-    extent = v.ptp(axis=0)
+    extent = np.ptp(v, axis=0)
     eye = center + np.array([0, 0, extent[2] * 2])
     up = np.array([0, 1, 0])
     return center, eye, up
@@ -361,7 +361,7 @@ def anterior_camera(v):
     Returns (lookat, eye, up) for use with render_mesh_to_image.
     """
     center = v.mean(axis=0)
-    extent = v.ptp(axis=0)
+    extent = np.ptp(v, axis=0)
     eye = center + np.array([0, extent[1] * 2, 0])
     up = np.array([0, 0, 1])
     return center, eye, up

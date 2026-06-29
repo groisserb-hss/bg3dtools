@@ -1,0 +1,66 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyCompatibilityInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ourVersions">
+        <value>
+          <list size="2">
+            <item index="0" class="java.lang.String" itemvalue="3.13" />
+            <item index="1" class="java.lang.String" itemvalue="3.5" />
+          </list>
+        </value>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="pytorch" />
+          <option value="torchvision" />
+          <option value="torchaudio" />
+          <option value="lxml" />
+          <option value="shapely" />
+          <option value="opencv" />
+          <option value="pyarrow" />
+          <option value="tensorboard" />
+          <option value="plyfile" />
+          <option value="scikit-image" />
+          <option value="pytz" />
+          <option value="transformers" />
+          <option value="regex" />
+          <option value="psutil" />
+          <option value="dill" />
+          <option value="xxhash" />
+          <option value="multiprocess" />
+          <option value="wrapt" />
+          <option value="huggingface_hub" />
+          <option value="accelerate" />
+          <option value="deprecated" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyPep8Inspection" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <option name="ignoredErrors">
+        <list>
+          <option value="E222" />
+          <option value="E203" />
+          <option value="E701" />
+          <option value="E201" />
+          <option value="E221" />
+          <option value="E266" />
+          <option value="E202" />
+          <option value="E501" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyPep8NamingInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <option name="ignoredErrors">
+        <list>
+          <option value="N806" />
+          <option value="N803" />
+          <option value="N802" />
+          <option value="N812" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
