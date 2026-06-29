@@ -32,5 +32,8 @@ pip-delete-this-directory.txt
 *.swp
 *~
 
+# JetBrains IDE
+.idea/
+
 # Claude Code local settings (per-machine, not shared)
 .claude/settings.local.json
