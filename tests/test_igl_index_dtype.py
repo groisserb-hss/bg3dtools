@@ -1,0 +1,95 @@
+"""Guard against libigl integer-dtype mismatches.
+
+libigl's pybind bindings require every *array* integer argument of a call (the
+faces ``f`` plus index arrays such as ``exact_geodesic``'s source/target sets
+``vs``/``vt``) to share ONE integer dtype, or they reject the call::
+
+    ValueError: Invalid type (int64, Row Major) for argument 'vs'.
+    Expected it to match argument 'f' which is of type (int32, Row Major).
+
+NumPy's default integer is int64 on Linux/macOS but int32 on Windows, and mesh
+I/O historically mixed the two, so this only ever bit on some hosts. These tests
+pin the two defenses: (1) ``match_index_dtype`` harmonizes index arrays to f's
+dtype at the call site; (2) the mesh readers canonicalize faces to int64.
+
+(Scalar index arguments — e.g. ``point_simplex_squared_distance``'s face index —
+are NOT subject to this matching, verified separately, so they need no fix.)
+"""
+
+import numpy as np
+import pytest
+import igl
+
+from bg3dtools.mesh.utils import match_index_dtype
+
+
+def _mesh():
+    """A tiny non-degenerate triangle mesh (int64 faces)."""
+    v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [2, 0, 0]],
+                 dtype=np.float64)
+    f = np.array([[0, 1, 2], [1, 3, 2], [1, 4, 3]], dtype=np.int64)
+    return v, f
+
+
+# ---------------------------------------------------------------------------
+# match_index_dtype
+# ---------------------------------------------------------------------------
+
+def test_match_index_dtype_matches_faces():
+    f32 = np.array([[0, 1, 2]], dtype=np.int32)
+    f64 = f32.astype(np.int64)
+    assert match_index_dtype(f32, np.arange(3, dtype=np.int64)).dtype == np.int32
+    assert match_index_dtype(f64, np.arange(3, dtype=np.int32)).dtype == np.int64
+
+
+def test_match_index_dtype_multiple_and_contiguous():
+    f = np.array([[0, 1, 2]], dtype=np.int32)
+    a, b = match_index_dtype(f, np.arange(3, dtype=np.int64), np.arange(2, dtype=np.int64))
+    assert a.dtype == np.int32 and b.dtype == np.int32
+    assert a.flags['C_CONTIGUOUS'] and b.flags['C_CONTIGUOUS']
+
+
+def test_match_index_dtype_float_faces_fall_back_to_int64():
+    # an empty / float face placeholder must still yield a usable integer dtype
+    out = match_index_dtype(np.zeros((0, 3), dtype=np.float64), np.arange(2))
+    assert out.dtype == np.int64
+
+
+# ---------------------------------------------------------------------------
+# The libigl constraint these defenses exist for
+# ---------------------------------------------------------------------------
+
+def test_exact_geodesic_rejects_mixed_dtypes():
+    """Mixed face/index integer dtypes raise — this is the bug we guard against."""
+    v, f = _mesh()
+    f32 = f.astype(np.int32)
+    vs = np.array([0], dtype=np.int64)            # int64 index vs int32 faces
+    vt = np.arange(v.shape[0], dtype=np.int64)
+    with pytest.raises(ValueError, match="Invalid type"):
+        igl.exact_geodesic(v, f32, vs, vt)
+
+
+@pytest.mark.parametrize("face_dtype", [np.int32, np.int64])
+def test_exact_geodesic_succeeds_when_harmonized(face_dtype):
+    """Harmonizing vs/vt to f.dtype (the fix pattern) works for any face dtype."""
+    v, f = _mesh()
+    ff = f.astype(face_dtype)
+    vs = match_index_dtype(ff, np.array([0], dtype=np.int64))
+    vt = match_index_dtype(ff, np.arange(v.shape[0], dtype=np.int64))
+    d = igl.exact_geodesic(v, ff, vs, vt)
+    assert d.shape == (v.shape[0],)
+    assert d[0] == pytest.approx(0.0, abs=1e-9)   # distance source→itself
+
+
+# ---------------------------------------------------------------------------
+# I/O boundary: readers canonicalize faces to int64
+# ---------------------------------------------------------------------------
+
+def test_mesh_readers_return_int64_faces(tmp_path):
+    from bg3dtools.mesh.mesh_io import (read_triangle_mesh, read_colored_plyfile,
+                                        write_colored_plyfile)
+    v, f = _mesh()
+    p = str(tmp_path / "mesh.ply")
+    write_colored_plyfile(p, v, f)                # PLY stores int32 indices on disk
+    assert read_colored_plyfile(p)[1].dtype == np.int64
+    assert read_triangle_mesh(p)[1].dtype == np.int64

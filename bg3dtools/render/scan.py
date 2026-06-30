@@ -29,6 +29,17 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 
+class RenderUnavailable(RuntimeError):
+    """No Open3D rendering backend (offscreen or legacy) is usable on this host.
+
+    Raised when BOTH the headless OffscreenRenderer and the legacy Visualizer
+    fail — e.g. a Windows/Linux box with neither EGL/Filament headless support
+    nor a usable display. Callers should treat this as non-fatal and skip image
+    output: the pipeline's data products (CSVs, meshes, gate files) are written
+    independently of figures.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Geometry spec dataclasses
 # ---------------------------------------------------------------------------
@@ -492,14 +503,22 @@ def _exec_legacy(frames, camera: CameraParams, options: RenderOptions) -> List[n
 
 
 def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> List[np.ndarray]:
-    """Backend dispatch (the single chokepoint): macOS → legacy; else offscreen, falling back to legacy."""
-    if sys.platform == 'darwin':
-        return _exec_legacy(frames, camera, options)
-    try:
-        return _exec_offscreen(frames, camera, options)
-    except Exception as exc:
-        log.debug("OffscreenRenderer unavailable (%s), using legacy Visualizer", exc)
-        return _exec_legacy(frames, camera, options)
+    """Backend dispatch (the single chokepoint): macOS uses the legacy Visualizer;
+    elsewhere try the headless OffscreenRenderer first, then fall back to legacy.
+
+    Tiered fallback: offscreen → legacy → RenderUnavailable. If EVERY backend
+    fails (e.g. headless Windows with no EGL and no display), raise
+    RenderUnavailable so callers can skip images and still produce their data
+    outputs, rather than letting the crash propagate and abort the run."""
+    backends = [_exec_legacy] if sys.platform == 'darwin' else [_exec_offscreen, _exec_legacy]
+    errors = []
+    for backend in backends:
+        try:
+            return backend(frames, camera, options)
+        except Exception as exc:
+            log.debug("render backend %s unavailable: %s", backend.__name__, exc)
+            errors.append("%s: %s" % (backend.__name__, exc))
+    raise RenderUnavailable("no usable Open3D render backend (" + "; ".join(errors) + ")")
 
 
 # ---------------------------------------------------------------------------

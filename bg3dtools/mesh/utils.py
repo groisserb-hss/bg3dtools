@@ -33,7 +33,33 @@ __all__ = [
     "sample_obj_vtex",
     "get_genus",
     "geodesic_submesh",
+    "match_index_dtype",
 ]
+
+
+def match_index_dtype(faces: np.ndarray, *arrays: np.ndarray):
+    """Coerce integer index *arrays* to ``faces``'s integer dtype.
+
+    libigl's pybind bindings require every *array* integer argument of a call
+    (the faces ``f`` plus any vertex-index arrays such as ``exact_geodesic``'s
+    source/target sets ``vs``/``vt``) to share ONE integer dtype, else they
+    reject the call with::
+
+        ValueError: Invalid type (int64, Row Major) for argument 'vs'.
+        Expected it to match argument 'f' which is of type (int32, Row Major).
+
+    NumPy's default integer differs by platform (int64 on Linux/macOS, int32 on
+    Windows) and mesh I/O can mix the two, so the mismatch only ever surfaces on
+    some hosts. Routing index arrays through here guarantees consistency
+    regardless of platform or provenance. (Scalar index arguments — e.g.
+    ``point_simplex_squared_distance``'s face index — are *not* affected by this
+    matching and need no coercion.)
+
+    Returns a single array when one is given, else a list in argument order.
+    """
+    dt = faces.dtype if faces.dtype.kind in 'iu' else np.dtype(np.int64)
+    out = [np.ascontiguousarray(a, dtype=dt) for a in arrays]
+    return out[0] if len(out) == 1 else out
 
 
 def extract_manifold_patches(
