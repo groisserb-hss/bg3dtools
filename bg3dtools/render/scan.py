@@ -1,10 +1,16 @@
 """Unified 3D diagnostic renderer (the single home for what used to live in humanfit.utils.render).
 
 Geometry specs are plain data objects describing *what* to draw. ``render_scan()`` writes a video and
-``render_frame()`` returns a single image; both share ONE backend core (``_render_to_images``):
+``render_frame()`` returns a single image; both share ONE backend core (``_render_to_images``), which
+tries these tiers in order and returns the first that works:
 
  1. OffscreenRenderer (headless EGL/Filament) — Linux servers / Modal.
- 2. legacy Visualizer — macOS (visible window) and interactive Linux.
+ 2. legacy Visualizer — macOS (visible window) and interactive Linux/Windows.
+ 3. matplotlib Agg (CPU only, no GPU or display) — universal last-resort fallback. Crude and
+    diagnostic-only, but always available; runs when both Open3D backends are dead (e.g. headless
+    Windows/Linux with no EGL and no display). Needs the ``viz`` extra's matplotlib.
+
+If every tier fails (matplotlib not installed either), ``RenderUnavailable`` is raised.
 
 ``render_mesh_to_image`` (bg3dtools.render.o3d) is a thin wrapper over ``render_frame``, so the two
 render engines that used to exist in parallel are now one implementation. humanfit.utils.render is a
@@ -30,13 +36,14 @@ log = logging.getLogger(__name__)
 
 
 class RenderUnavailable(RuntimeError):
-    """No Open3D rendering backend (offscreen or legacy) is usable on this host.
+    """No rendering backend (offscreen, legacy, or the matplotlib fallback) is usable on this host.
 
-    Raised when BOTH the headless OffscreenRenderer and the legacy Visualizer
-    fail — e.g. a Windows/Linux box with neither EGL/Filament headless support
-    nor a usable display. Callers should treat this as non-fatal and skip image
-    output: the pipeline's data products (CSVs, meshes, gate files) are written
-    independently of figures.
+    Raised only when ALL tiers fail: the headless OffscreenRenderer, the legacy
+    Visualizer, AND the CPU matplotlib Agg fallback — e.g. a box with neither
+    EGL/Filament headless support nor a display AND without matplotlib (the
+    ``viz`` extra) installed. Callers should treat this as non-fatal and skip
+    image output: the pipeline's data products (CSVs, meshes, gate files) are
+    written independently of figures.
     """
 
 
@@ -502,23 +509,312 @@ def _exec_legacy(frames, camera: CameraParams, options: RenderOptions) -> List[n
     return images
 
 
-def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> List[np.ndarray]:
-    """Backend dispatch (the single chokepoint): macOS uses the legacy Visualizer;
-    elsewhere try the headless OffscreenRenderer first, then fall back to legacy.
+# ---------------------------------------------------------------------------
+# Matplotlib software fallback (tier 3): CPU-only, no GPU/display, always usable
+# ---------------------------------------------------------------------------
+# This runs entirely on matplotlib's Agg canvas, so it works on a headless host
+# with neither a GPU/EGL (offscreen) nor a display (legacy). Quality is
+# deliberately crude — it exists so a diagnostic figure still appears when both
+# Open3D backends are dead, instead of none at all. Everything here is pure
+# NumPy (no Open3D), which is the whole point: it must run when Open3D cannot.
+# matplotlib is the ``viz`` extra; if it is absent, _exec_matplotlib raises
+# ImportError and the dispatcher falls through to RenderUnavailable.
 
-    Tiered fallback: offscreen → legacy → RenderUnavailable. If EVERY backend
-    fails (e.g. headless Windows with no EGL and no display), raise
-    RenderUnavailable so callers can skip images and still produce their data
-    outputs, rather than letting the crash propagate and abort the run."""
+_MPL_MESH_FACE_CAP = 40_000    # above this a Mesh is drawn as its vertices (points), else Agg hangs
+
+
+def _finite_points(arr) -> np.ndarray:
+    """Rows of ``arr`` (reshaped to (-1, 3)) with all-finite coords — for bbox/aspect."""
+    a = np.asarray(arr, dtype=np.float64).reshape(-1, 3)
+    return a[np.isfinite(a).all(axis=1)]
+
+
+def _mpl_up_rotation(up) -> np.ndarray:
+    """3x3 rotation ``M`` with ``M @ up == +Z``, mapping the scene's up onto matplotlib's vertical
+    axis. The remaining in-plane (azimuth) freedom is irrelevant: the view direction is recomputed in
+    the SAME rotated frame, so the rendered orientation is invariant to which such ``M`` is chosen."""
+    u = np.asarray(up, dtype=np.float64)
+    n = np.linalg.norm(u)
+    u = u / n if n > 1e-12 else np.array([0.0, 0.0, 1.0])
+    ref = np.array([1.0, 0.0, 0.0]) if abs(u[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    e1 = ref - u * float(u @ ref)
+    e1 /= (np.linalg.norm(e1) + 1e-12)
+    e2 = np.cross(u, e1)
+    return np.stack([e1, e2, u], axis=0)
+
+
+def _rawgeom_to_mpl(spec: _RawGeom, style: RenderStyle) -> list:
+    """Best-effort extraction of NumPy arrays from an already-built Open3D geometry (the compat path).
+    Duck-typed so it never imports Open3D; returns [] (and logs) if the geometry can't be read."""
+    g = spec.geom
+    try:
+        if hasattr(g, 'triangles') and hasattr(g, 'vertices'):
+            verts = np.asarray(g.vertices, dtype=np.float64)
+            faces = np.asarray(g.triangles, dtype=np.int64)
+            if hasattr(g, 'vertex_colors') and len(g.vertex_colors) > 0:
+                rgb = np.clip(np.asarray(g.vertex_colors, float), 0, 1)[faces].mean(axis=1)
+            else:
+                rgb = np.array([0.6, 0.6, 0.6])
+            return [{'kind': 'mesh', 'verts': verts, 'faces': faces, 'rgb': rgb}]
+        if hasattr(g, 'lines') and hasattr(g, 'points'):
+            pts = np.asarray(g.points, dtype=np.float64)
+            edges = np.asarray(g.lines, dtype=np.int64)
+            return [{'kind': 'lines', 'segs': pts[edges], 'rgb': np.array([0.5, 0.5, 0.5]),
+                     'width': float(style.line_width)}]
+        if hasattr(g, 'points'):
+            pts = np.asarray(g.points, dtype=np.float64)
+            cols = (np.asarray(g.colors, float) if hasattr(g, 'colors') and len(g.colors) > 0
+                    else _height_colormap(pts))
+            return [{'kind': 'points', 'xyz': pts, 'rgb': np.clip(cols, 0, 1),
+                     'size': float(style.point_size)}]
+    except Exception as exc:
+        log.debug("matplotlib fallback could not read _RawGeom (%s); skipping", exc)
+    return []
+
+
+def _spec_to_mpl(spec: GeometrySpec, style: RenderStyle) -> list:
+    """Convert a geometry spec into backend-neutral matplotlib primitives (dicts). The NumPy sibling of
+    ``_spec_to_o3d`` — uses NO Open3D so it runs when the Open3D backends are unavailable.
+
+    Primitive kinds:
+      {'kind':'points', 'xyz':(N,3), 'rgb':(N,3),      'size':float}
+      {'kind':'lines',  'segs':(M,2,3), 'rgb':(3,)|(M,3), 'width':float}
+      {'kind':'mesh',   'verts':(V,3), 'faces':(F,3),  'rgb':(3,)|(F,3)}
+    """
+    def line_w(s) -> float:
+        v = getattr(s, 'line_width', None)
+        return float(v) if v is not None else float(style.line_width)
+
+    if isinstance(spec, _RawGeom):
+        return _rawgeom_to_mpl(spec, style)
+
+    if isinstance(spec, Wireframe):
+        edges = _wireframe_edges(spec.faces)
+        segs = np.asarray(spec.vertices, dtype=np.float64)[edges]         # (E, 2, 3)
+        return [{'kind': 'lines', 'segs': segs, 'rgb': np.array(spec.color, float), 'width': line_w(spec)}]
+
+    if isinstance(spec, PointCloudSpec):
+        pts, colors = _subsample(spec.points, spec.colors, spec.max_points)
+        if colors is None:
+            colors = _height_colormap(pts)
+        ps = spec.point_size if spec.point_size is not None else style.point_size
+        return [{'kind': 'points', 'xyz': np.asarray(pts, float),
+                 'rgb': np.clip(np.asarray(colors, float), 0, 1), 'size': float(ps)}]
+
+    if isinstance(spec, Skeleton):
+        joints = np.asarray(spec.joints, dtype=np.float64)
+        finite = np.isfinite(joints).all(axis=1)
+        valid = [(a, b) for a, b in spec.connections
+                 if 0 <= a < len(joints) and 0 <= b < len(joints) and finite[a] and finite[b]]
+        prims = []
+        if valid:
+            segs = np.stack([joints[[a, b]] for a, b in valid], axis=0)   # (M, 2, 3)
+            prims.append({'kind': 'lines', 'segs': segs, 'rgb': np.array(spec.color, float),
+                          'width': line_w(spec)})
+        if finite.any():                                                  # joints as markers (cheaper than icosahedra)
+            k = int(finite.sum())
+            prims.append({'kind': 'points', 'xyz': joints[finite],
+                          'rgb': np.tile(np.array(spec.color, float), (k, 1)),
+                          'size': max(line_w(spec) * 3.0, 6.0)})
+        return prims
+
+    if isinstance(spec, Floor):
+        y, h = spec.y, spec.half_extent
+        verts = np.array([[-h, y, -h], [h, y, -h], [h, y, h], [-h, y, h]], dtype=np.float64)
+        faces = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int64)
+        return [{'kind': 'mesh', 'verts': verts, 'faces': faces, 'rgb': np.array(spec.color, float)}]
+
+    if isinstance(spec, CameraFrustum):
+        from bg3dtools.mesh.generate import build_camera_frustum
+        verts, edges = build_camera_frustum(spec.hfov, spec.vfov, spec.scale)
+        verts_world = (np.asarray(spec.rotation, float).T @ verts.T).T + np.asarray(spec.position, float)[None, :]
+        return [{'kind': 'lines', 'segs': verts_world[edges], 'rgb': np.array(spec.color, float),
+                 'width': line_w(spec)}]
+
+    if isinstance(spec, Mesh):
+        verts = np.asarray(spec.vertices, dtype=np.float64)
+        faces = np.asarray(spec.faces, dtype=np.int64)
+        if spec.vertex_colors is not None:
+            rgb = np.clip(np.asarray(spec.vertex_colors, float), 0, 1)[faces].mean(axis=1)  # per-face avg
+        else:
+            rgb = np.array(spec.color, float)
+        return [{'kind': 'mesh', 'verts': verts, 'faces': faces, 'rgb': rgb}]
+
+    if isinstance(spec, Lines):
+        segs = np.asarray(spec.points, float)[np.asarray(spec.edges, dtype=np.int64)]
+        return [{'kind': 'lines', 'segs': segs, 'rgb': np.array(spec.color, float), 'width': line_w(spec)}]
+
+    raise TypeError(f"Unknown geometry spec: {type(spec)}")
+
+
+def _draw_prims_mpl(ax, prims: list, M: np.ndarray) -> None:
+    """Draw backend-neutral primitives onto a matplotlib 3D axes, rotating every coordinate by ``M``
+    (scene up → +Z). Non-finite rows are dropped per-primitive so a stray NaN never blanks the frame."""
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
+
+    for p in prims:
+        if p['kind'] == 'points':
+            raw = np.asarray(p['xyz'], float).reshape(-1, 3)
+            mask = np.isfinite(raw).all(axis=1)
+            if not mask.any():
+                continue
+            r = raw[mask] @ M.T
+            s = float(np.clip(float(p['size']) ** 2, 1.0, 60.0))
+            rgb = np.asarray(p['rgb'], float)
+            if rgb.ndim == 2:
+                ax.scatter(r[:, 0], r[:, 1], r[:, 2], c=np.clip(rgb[mask], 0, 1),
+                           s=s, depthshade=False, edgecolors='none')
+            else:
+                ax.scatter(r[:, 0], r[:, 1], r[:, 2], color=tuple(np.clip(rgb, 0, 1)),
+                           s=s, depthshade=False, edgecolors='none')
+
+        elif p['kind'] == 'lines':
+            segs = np.asarray(p['segs'], float)                          # (M, 2, 3)
+            good = np.isfinite(segs).all(axis=(1, 2))
+            if not good.any():
+                continue
+            segs = segs[good]
+            rs = (segs.reshape(-1, 3) @ M.T).reshape(segs.shape)
+            rgb = np.asarray(p['rgb'], float)
+            cols = np.clip(rgb[good], 0, 1) if rgb.ndim == 2 else np.clip(rgb, 0, 1)
+            ax.add_collection3d(Line3DCollection(list(rs), colors=cols,
+                                                 linewidths=float(p.get('width', 1.0))))
+
+        elif p['kind'] == 'mesh':
+            verts = np.asarray(p['verts'], float)
+            faces = np.asarray(p['faces'], dtype=np.int64)
+            rgb = np.asarray(p['rgb'], float)
+            if len(faces) > _MPL_MESH_FACE_CAP:                          # too heavy for the CPU rasterizer
+                vf = _finite_points(verts) @ M.T
+                base = np.clip(rgb if rgb.ndim == 1 else rgb.mean(axis=0), 0, 1)
+                ax.scatter(vf[:, 0], vf[:, 1], vf[:, 2], color=tuple(base),
+                           s=1.0, depthshade=False, edgecolors='none')
+                log.warning("matplotlib fallback: mesh has %d faces (> %d cap); drawing vertices as points",
+                            len(faces), _MPL_MESH_FACE_CAP)
+                continue
+            tris = (verts[faces].reshape(-1, 3) @ M.T).reshape(-1, 3, 3)
+            fc = np.clip(rgb, 0, 1)
+            ax.add_collection3d(Poly3DCollection(list(tris), facecolors=fc, edgecolors='none'))
+
+
+def _exec_matplotlib(frames, camera: CameraParams, options: RenderOptions) -> List[np.ndarray]:
+    """Tier-3 software fallback: render every frame on matplotlib's Agg 3D canvas (CPU only, no GPU or
+    display). Crude but always available — used only when both Open3D backends fail. Returns a list of
+    (H, W, 3) uint8 images at ``options.width`` x ``options.height``.
+
+    Camera: the scene is framed to its overall finite bounding box (or ``camera.view_aabb``), centered
+    in view, seen from ``_resolve_eye(camera)`` with ``camera.up`` mapped to the vertical axis and a
+    perspective fov of ``camera.fov``. This approximates the Open3D pinhole framing — good enough for a
+    diagnostic last resort, not pixel-identical to the GPU backends."""
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from mpl_toolkits.mplot3d import art3d  # noqa: F401  (imports the package → registers the '3d' projection)
+    from PIL import Image
+
+    style = options.style
+    W, H = int(options.width), int(options.height)
+    bg = tuple(float(c) for c in style.bg_color[:3])
+
+    # Build primitives once per frame and collect a GLOBAL finite bbox → a stable camera across frames.
+    frame_prims, allpts = [], []
+    for spec_list in frames:
+        prims = []
+        for spec in spec_list:
+            try:
+                prims.extend(_spec_to_mpl(spec, style))
+            except Exception as exc:
+                log.debug("matplotlib fallback skipped a %s spec: %s", type(spec).__name__, exc)
+        frame_prims.append(prims)
+        for p in prims:
+            key = {'points': 'xyz', 'lines': 'segs', 'mesh': 'verts'}[p['kind']]
+            allpts.append(_finite_points(p[key]))
+
+    pts_all = np.concatenate(allpts, axis=0) if allpts else np.zeros((0, 3))
+    if getattr(camera, 'view_aabb', None) is not None:
+        mn = np.asarray(camera.view_aabb[0], float)
+        mx = np.asarray(camera.view_aabb[1], float)
+    elif len(pts_all):
+        mn, mx = pts_all.min(axis=0), pts_all.max(axis=0)
+    else:
+        mn, mx = -np.ones(3), np.ones(3)
+    center = (mn + mx) / 2.0
+
+    M = _mpl_up_rotation(camera.up)
+    # View direction in the rotated frame (scene up → +Z), toward the bbox center that matplotlib centers on.
+    vdir = M @ (_resolve_eye(camera) - center)
+    nvd = np.linalg.norm(vdir)
+    vdir = vdir / nvd if nvd > 1e-12 else np.array([0.0, 0.0, 1.0])
+    elev = float(np.degrees(np.arcsin(np.clip(vdir[2], -1.0, 1.0))))
+    azim = float(np.degrees(np.arctan2(vdir[1], vdir[0])))
+
+    # Rotated bbox corners → axis limits + true box aspect (so the fallback preserves proportions).
+    corners = np.array([[x, y, z] for x in (mn[0], mx[0]) for y in (mn[1], mx[1]) for z in (mn[2], mx[2])])
+    rc = corners @ M.T
+    rmn, rmx = rc.min(axis=0), rc.max(axis=0)
+    rspan = np.maximum(rmx - rmn, 1e-6)
+
+    dpi = 100.0
+    fov = float(camera.fov)
+    focal = 1.0 / max(np.tan(np.radians(fov) / 2.0), 1e-3)
+
+    images = []
+    for prims in frame_prims:
+        fig = Figure(figsize=(W / dpi, H / dpi), dpi=dpi)
+        fig.patch.set_facecolor(bg)
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_axes([0, 0, 1, 1], projection='3d')
+        ax.set_facecolor(bg)
+
+        _draw_prims_mpl(ax, prims, M)
+
+        ax.set_xlim(rmn[0], rmx[0]); ax.set_ylim(rmn[1], rmx[1]); ax.set_zlim(rmn[2], rmx[2])
+        try:
+            ax.set_box_aspect(tuple(rspan))
+        except Exception:
+            pass
+        try:
+            ax.view_init(elev=elev, azim=azim, roll=0)
+        except TypeError:                                                # matplotlib < 3.5: no roll kwarg
+            ax.view_init(elev=elev, azim=azim)
+        try:
+            ax.set_proj_type('persp', focal_length=focal)
+        except (TypeError, ValueError):                                  # matplotlib < 3.6: no focal_length
+            try:
+                ax.set_proj_type('persp')
+            except Exception:
+                pass
+        ax.set_axis_off()
+
+        canvas.draw()
+        buf = np.asarray(canvas.buffer_rgba())[..., :3]
+        if buf.shape[1] != W or buf.shape[0] != H:                       # dpi rounding → snap to contract size
+            buf = np.asarray(Image.fromarray(buf).resize((W, H), Image.BILINEAR))
+        images.append(np.ascontiguousarray(buf, dtype=np.uint8))
+    return images
+
+
+def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> List[np.ndarray]:
+    """Backend dispatch (the single chokepoint). Tiers, first that works wins:
+    offscreen → legacy → matplotlib → RenderUnavailable (macOS starts at legacy).
+
+    The matplotlib tier is a CPU software renderer that needs no GPU or display, so a host where both
+    Open3D backends are dead (e.g. headless Windows with no EGL and no display) still gets a crude
+    diagnostic image. Only if matplotlib is ALSO unavailable do we raise RenderUnavailable, letting
+    callers skip images and still produce their data outputs instead of aborting the run."""
     backends = [_exec_legacy] if sys.platform == 'darwin' else [_exec_offscreen, _exec_legacy]
+    backends = backends + [_exec_matplotlib]
     errors = []
     for backend in backends:
         try:
-            return backend(frames, camera, options)
+            images = backend(frames, camera, options)
         except Exception as exc:
             log.debug("render backend %s unavailable: %s", backend.__name__, exc)
             errors.append("%s: %s" % (backend.__name__, exc))
-    raise RenderUnavailable("no usable Open3D render backend (" + "; ".join(errors) + ")")
+            continue
+        if errors:                                                       # a preferred backend failed → say which tier ran
+            log.warning("render fell back to %s after: %s", backend.__name__, "; ".join(errors))
+        return images
+    raise RenderUnavailable("no usable render backend (" + "; ".join(errors) + ")")
 
 
 # ---------------------------------------------------------------------------
