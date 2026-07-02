@@ -93,3 +93,42 @@ def test_mesh_readers_return_int64_faces(tmp_path):
     write_colored_plyfile(p, v, f)                # PLY stores int32 indices on disk
     assert read_colored_plyfile(p)[1].dtype == np.int64
     assert read_triangle_mesh(p)[1].dtype == np.int64
+
+
+# ---------------------------------------------------------------------------
+# make_manifold: int64-pinned collapse + graceful post-collapse fallback
+#
+# On the Windows libigl wheel, collapse_small_triangles / remove_unreferenced
+# hand back int32 faces, and the manifold checks then report spurious
+# non-manifoldness — which aborted the whole preprocessing run. The fix pins
+# int64 across the collapse and, if the (cosmetic) collapse still can't be kept
+# manifold + closed, keeps the already-good pre-collapse mesh instead of raising.
+# ---------------------------------------------------------------------------
+
+def _closed_tetra():
+    v = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float64)
+    f = np.array([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]], dtype=np.int64)
+    return v, f
+
+
+def test_make_manifold_survives_broken_collapse(monkeypatch, caplog):
+    """A post-collapse mesh that fails the manifold check must not abort the run.
+
+    Forces the cosmetic-collapse branch (a < area_thresh) and makes that collapse
+    return a non-manifold mesh — the Windows-wheel failure mode. make_manifold
+    must keep the (already manifold + closed) pre-collapse mesh and warn, not raise.
+    """
+    from bg3dtools.mesh import clean
+    v, f = _closed_tetra()
+    monkeypatch.setattr(clean.igl, "doublearea", lambda vv, ff: np.array([1e-30]))
+    monkeypatch.setattr(
+        clean.igl, "collapse_small_triangles",
+        lambda vv, ff, t: np.vstack([np.asarray(ff), np.asarray(ff)[:1]]),  # dup a face
+    )
+    with caplog.at_level("WARNING"):
+        v2, f2 = clean.make_manifold(v.copy(), f.copy())        # must not raise
+    assert f2.dtype == np.int64                                 # int64 pinned
+    assert not igl.all_boundary_loop(f2)                        # closed
+    assert igl.is_edge_manifold(f2)                             # edge-manifold
+    assert np.array_equal(np.sort(f2, 1), np.sort(f, 1))        # reverted to input
+    assert "retaining the pre-collapse mesh" in caplog.text
