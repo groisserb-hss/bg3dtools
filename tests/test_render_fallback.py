@@ -14,6 +14,8 @@ The pure-NumPy / dispatch tests need no optional deps; the ones that actually ra
 ``pytest.importorskip("matplotlib")`` (the ``viz`` extra).
 """
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -54,6 +56,15 @@ def _full_scene():
 def _background_fraction(img, thresh=250):
     """Fraction of pixels that are (near-)white background — 1.0 means a blank frame."""
     return float(np.mean(np.all(img >= thresh, axis=-1)))
+
+
+@pytest.fixture(autouse=True)
+def _clear_dead_backends():
+    """The dispatcher memoizes failed backends process-wide; reset it between tests so
+    backend-monkeypatching tests don't leak dead-backend state into one another."""
+    scan._dead_backends.clear()
+    yield
+    scan._dead_backends.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -169,3 +180,42 @@ def test_render_unavailable_when_every_tier_fails(monkeypatch):
     monkeypatch.setattr(scan.sys, "platform", "linux")
     with pytest.raises(RenderUnavailable):
         _render_to_images([_full_scene()], _camera(), RenderOptions())
+
+
+def test_dead_backend_probed_once_then_skipped_silently(monkeypatch, caplog):
+    """A dead Open3D backend is probed once, then skipped for the rest of the process.
+
+    This is what keeps a headless host (e.g. Windows without EGL) from reprinting Open3D's
+    native "EGL Headless is not supported" error on every frame: offscreen + legacy are each
+    attempted once, the fallback warning is logged once, and later frames go straight to
+    matplotlib in silence."""
+    pytest.importorskip("matplotlib")
+    calls = {"offscreen": 0, "legacy": 0, "mpl": 0}
+
+    def dead_offscreen(*a, **k):
+        calls["offscreen"] += 1
+        raise RuntimeError("EGL Headless is not supported")         # the Windows native failure
+    def dead_legacy(*a, **k):
+        calls["legacy"] += 1
+        raise RuntimeError("no display available")
+    real_mpl = scan._exec_matplotlib
+    def counting_mpl(*a, **k):
+        calls["mpl"] += 1
+        return real_mpl(*a, **k)
+
+    monkeypatch.setattr(scan, "_exec_offscreen", dead_offscreen)
+    monkeypatch.setattr(scan, "_exec_legacy", dead_legacy)
+    monkeypatch.setattr(scan, "_exec_matplotlib", counting_mpl)
+    monkeypatch.setattr(scan.sys, "platform", "linux")             # exercise the full 3-tier chain
+
+    opts = RenderOptions(width=64, height=64)
+    with caplog.at_level(logging.WARNING, logger="bg3dtools.render.scan"):
+        for _ in range(3):
+            imgs = _render_to_images([_full_scene()], _camera(), opts)
+            assert imgs[0].shape == (64, 64, 3)
+
+    assert calls["offscreen"] == 1                                  # probed once despite 3 renders
+    assert calls["legacy"] == 1
+    assert calls["mpl"] == 3                                        # matplotlib runs every frame
+    fell_back = [r for r in caplog.records if "render fell back" in r.getMessage()]
+    assert len(fell_back) == 1                                      # warned once, silent thereafter

@@ -793,6 +793,17 @@ def _exec_matplotlib(frames, camera: CameraParams, options: RenderOptions) -> Li
     return images
 
 
+# Backends that have already failed in this process. Open3D's offscreen/legacy
+# engines print a native (C++) error to stderr *before* raising when a
+# GPU/EGL/display context can't be created (e.g. "EGL Headless is not supported"
+# on headless Windows); re-probing a dead backend on every frame reprints that
+# noise. We remember failures here and skip known-dead backends for the rest of
+# the process, so the native error surfaces at most once and the fallback is
+# silent thereafter. Process-local by design: a spawned render subprocess
+# (run_isolated) starts with a fresh set and does its own single probe.
+_dead_backends: set = set()
+
+
 def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> List[np.ndarray]:
     """Backend dispatch (the single chokepoint). Tiers, first that works wins:
     offscreen → legacy → matplotlib → RenderUnavailable (macOS starts at legacy).
@@ -800,21 +811,29 @@ def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> L
     The matplotlib tier is a CPU software renderer that needs no GPU or display, so a host where both
     Open3D backends are dead (e.g. headless Windows with no EGL and no display) still gets a crude
     diagnostic image. Only if matplotlib is ALSO unavailable do we raise RenderUnavailable, letting
-    callers skip images and still produce their data outputs instead of aborting the run."""
+    callers skip images and still produce their data outputs instead of aborting the run.
+
+    A backend that fails once is recorded in ``_dead_backends`` and skipped for the rest of the
+    process, so a dead Open3D backend prints its native error — and this function logs its fallback
+    warning — at most once per process rather than on every frame."""
     backends = [_exec_legacy] if sys.platform == 'darwin' else [_exec_offscreen, _exec_legacy]
     backends = backends + [_exec_matplotlib]
     errors = []
     for backend in backends:
+        if backend.__name__ in _dead_backends:                           # known-dead this process → skip silently, no re-probe
+            continue
         try:
             images = backend(frames, camera, options)
         except Exception as exc:
             log.debug("render backend %s unavailable: %s", backend.__name__, exc)
             errors.append("%s: %s" % (backend.__name__, exc))
+            _dead_backends.add(backend.__name__)                         # never re-probe → no repeated native stderr noise
             continue
-        if errors:                                                       # a preferred backend failed → say which tier ran
+        if errors:                                                       # a preferred backend failed *this call* → name the tier that ran
             log.warning("render fell back to %s after: %s", backend.__name__, "; ".join(errors))
         return images
-    raise RenderUnavailable("no usable render backend (" + "; ".join(errors) + ")")
+    raise RenderUnavailable(
+        "no usable render backend (" + ("; ".join(errors) or "all backends already failed this process") + ")")
 
 
 # ---------------------------------------------------------------------------
