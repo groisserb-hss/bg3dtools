@@ -10,6 +10,8 @@ import igl
 import numpy as np
 from pykdtree.kdtree import KDTree
 
+from bg3dtools.mesh.utils import as_igl_faces
+
 __all__ = [
     "MeshProjector",
 ]
@@ -38,6 +40,7 @@ class MeshProjector:
     """
 
     def __init__(self, v: np.ndarray, f: np.ndarray):
+        f = as_igl_faces(f)  # int64: vertex_triangle_adjacency/edges misbehave on int32 (Windows)
         self.v = v
         self.f = f
 

@@ -62,6 +62,24 @@ def match_index_dtype(faces: np.ndarray, *arrays: np.ndarray):
     return out[0] if len(out) == 1 else out
 
 
+def as_igl_faces(faces: np.ndarray) -> np.ndarray:
+    """Canonicalize a face array to C-contiguous int64 for libigl.
+
+    The class-2 companion to :func:`match_index_dtype`. Several libigl functions
+    *return* faces in a platform-dependent integer dtype -- notably the Windows wheel's
+    ``remove_unreferenced`` / ``collapse_small_triangles`` / ``decimate`` / ``upsample`` /
+    ``bfs_orient`` hand back int32 regardless of input dtype -- and feeding int32 faces to
+    predicates like ``is_edge_manifold`` / ``all_boundary_loop`` / ``is_vertex_manifold``
+    makes them report spurious non-manifoldness. Route faces coming out of (or into) such
+    calls through here so every libigl boundary sees one dtype regardless of platform or
+    provenance.
+
+    Unlike ``match_index_dtype`` (which coerces to *faces' own* dtype, possibly int32),
+    this always forces int64 -- the dtype these predicates behave correctly on.
+    """
+    return np.ascontiguousarray(faces, dtype=np.int64)
+
+
 def extract_manifold_patches(
     faces: np.ndarray
 ) -> Tuple[int, np.ndarray]:
@@ -178,7 +196,9 @@ def submesh(
     f_idx = f_idx[seder]
     new_verts, new_faces, _, v_idx = igl.remove_unreferenced(old_verts, sub_faces)
     new_verts = new_verts.reshape([-1, n])
-    new_faces = new_faces.reshape([-1, m])
+    # remove_unreferenced returns int32 faces on some libigl wheels (Windows) regardless of
+    # input dtype; pin int64 so every submesh consumer feeds int64 to downstream igl predicates.
+    new_faces = as_igl_faces(new_faces.reshape([-1, m]))
 
     if return_indices:
         return new_verts, new_faces, f_idx, v_idx
@@ -541,8 +561,8 @@ def ordered_edges(faces: np.ndarray) -> np.ndarray:
     edges : (nE, 2) ndarray
         Sorted edge list for consistency with MATLAB ordering.
     """
-    edges = igl.edges(faces.astype(np.int32))
-    idx = np.lexsort(edges[:, [1, 0]].T)  # for consistency with matlab edges
+    edges = igl.edges(as_igl_faces(faces))  # int64: match the repo-wide face dtype so the
+    idx = np.lexsort(edges[:, [1, 0]].T)    # returned edges never seed an int32/int64 mismatch
     return edges[idx, :]
 
 

@@ -13,7 +13,7 @@ import numpy as np
 from typing import Tuple, Optional, Union
 import scipy.sparse as sparse
 
-from bg3dtools.mesh.utils import submesh, sample_E2V, mesh_volume, extract_manifold_patches
+from bg3dtools.mesh.utils import submesh, sample_E2V, mesh_volume, extract_manifold_patches, as_igl_faces
 
 log = logging.getLogger(__name__)
 
@@ -371,6 +371,7 @@ def fill_hole_safe(
     faces : (nF', 3) ndarray
         Faces with the hole closed.
     """
+    faces = as_igl_faces(faces)  # int64: is_edge_manifold misbehaves on int32 (Windows wheel)
     if igl.is_edge_manifold(faces):
         try:
             candidate = fill_hole(verts, faces, boundary_vidx)
@@ -512,6 +513,7 @@ def close_end_caps(
         Total number of large loops detected. Equals `n_expected` in the
         happy case; differs when topology is unexpected.
     """
+    faces = as_igl_faces(faces)  # int64: all_boundary_loop misbehaves on int32 (Windows wheel)
     loops = igl.all_boundary_loop(faces)
     if not loops:
         return verts, faces, 0
@@ -739,6 +741,9 @@ def make_manifold(
         return verts, faces, vtex, ftex
 
     def _is_manifold_and_closed(faces):
+        # all_boundary_loop / is_edge_manifold report spurious non-manifoldness on the int32
+        # faces the Windows wheel returns from the in-loop submesh/bfs_orient calls; pin int64.
+        faces = as_igl_faces(faces)
         return (not igl.all_boundary_loop(faces)
                 and igl.is_edge_manifold(faces)
                 and nonmanifold_verts(faces)[0].size == 0)
@@ -772,6 +777,10 @@ def make_manifold(
                     np.full((added_faces, ftex.shape[1]), np.nan, dtype=ftex.dtype),
                 ])
         return verts, faces, vtex, ftex
+
+    # libigl returns int32 faces on some wheels (Windows) and the manifold predicates
+    # below misbehave on int32; canonicalize once up front so the whole routine stays int64.
+    faces = as_igl_faces(faces)
 
     # Initial: keep only the largest manifold patch.
     verts, faces, vtex, ftex = _largest_patch(verts, faces, vtex, ftex)

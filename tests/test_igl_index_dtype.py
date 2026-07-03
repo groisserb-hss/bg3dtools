@@ -132,3 +132,49 @@ def test_make_manifold_survives_broken_collapse(monkeypatch, caplog):
     assert igl.is_edge_manifold(f2)                             # edge-manifold
     assert np.array_equal(np.sort(f2, 1), np.sort(f, 1))        # reverted to input
     assert "retaining the pre-collapse mesh" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# as_igl_faces + class-2 (int32-return) guards
+#
+# Some libigl wheels (Windows) return int32 faces from remove_unreferenced /
+# decimate / upsample / bfs_orient regardless of input dtype, and the manifold
+# predicates (is_edge_manifold / all_boundary_loop) then misbehave on int32.
+# as_igl_faces pins int64 at those libigl boundaries; these guard the pins.
+# ---------------------------------------------------------------------------
+
+def test_as_igl_faces_forces_contiguous_int64():
+    from bg3dtools.mesh.utils import as_igl_faces
+    for arr in (np.array([[0, 1, 2]], np.int32),                        # int32 (Windows default)
+                np.asfortranarray(np.array([[0, 1, 2], [1, 2, 3]], np.int64)),  # non-contiguous
+                np.zeros((0, 3), np.float64)):                          # float placeholder
+        out = as_igl_faces(arr)
+        assert out.dtype == np.int64 and out.flags['C_CONTIGUOUS']
+
+
+def test_submesh_pins_int64_even_if_remove_unreferenced_returns_int32(monkeypatch):
+    """submesh must return int64 faces even on a wheel whose remove_unreferenced hands back
+    int32 (the Windows failure mode) — this is what protects make_manifold's main-loop
+    manifold checks and every other submesh caller (error.py, vertebrae.py, ...)."""
+    from bg3dtools.mesh import utils
+    v, f = _mesh()
+    real = utils.igl.remove_unreferenced
+    def int32_return(V, F):
+        nv, nf, i, j = real(V, F)
+        return nv, np.ascontiguousarray(nf, np.int32), i, j            # emulate the Windows wheel
+    monkeypatch.setattr(utils.igl, "remove_unreferenced", int32_return)
+    _, nf = utils.submesh(v, f, np.array([True, True, False]), return_indices=False)
+    assert nf.dtype == np.int64
+
+
+def test_edge_neighbors_canonicalizes_faces_before_manifold_predicate(monkeypatch):
+    """edge_neighbors must pin int64 before igl.is_edge_manifold so a wheel that (wrongly) reports
+    int32 faces as non-manifold does not fire the assert. Emulates that wheel behaviour: without
+    the int64 chokepoint, passing int32 faces would raise AssertionError."""
+    from bg3dtools.mesh import modify
+    v, f = _mesh()
+    real_iem = modify.igl.is_edge_manifold
+    monkeypatch.setattr(modify.igl, "is_edge_manifold",
+                        lambda F: real_iem(F) if F.dtype == np.int64 else False)
+    edges, neigh = modify.edge_neighbors(f.astype(np.int32))           # must NOT raise
+    assert len(edges) == len(neigh)
