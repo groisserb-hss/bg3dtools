@@ -463,12 +463,24 @@ def _exec_legacy(frames, camera: CameraParams, options: RenderOptions) -> List[n
     (else convert_from_pinhole is silently ignored → blank); the intrinsic is built from the ACTUAL
     framebuffer size (Retina-safe), then the explicit camera is re-applied every frame."""
     import open3d as o3d
+    import os
     style = options.style
+
+    # The legacy Visualizer needs a real GL context (a window) even when created invisibly, so it
+    # can't run on a headless host. On some builds create_window HARD-ABORTS there (native crash,
+    # uncatchable) instead of returning False -- taking the whole process down before the dispatcher
+    # can fall through to matplotlib. Fail *catchably* in the cases we can detect, so _render_to_images
+    # moves on to the matplotlib tier; the uncatchable-abort case is why callers isolate the first
+    # probe render in a subprocess (e.g. spinescrews.figures.probe_render_backends).
+    if sys.platform.startswith('linux') and not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
+        raise RuntimeError('legacy Visualizer unavailable: no X11/Wayland display (DISPLAY/WAYLAND_DISPLAY unset)')
 
     o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Warning)
     visible = sys.platform == 'darwin'
     vis = o3d.visualization.Visualizer()
-    vis.create_window(width=options.width, height=options.height, visible=visible)
+    if not vis.create_window(width=options.width, height=options.height, visible=visible):
+        vis.destroy_window()
+        raise RuntimeError('legacy Visualizer unavailable: could not create a GL window (headless / no GPU context)')
 
     opt = vis.get_render_option()
     opt.background_color = np.array(style.bg_color[:3])
