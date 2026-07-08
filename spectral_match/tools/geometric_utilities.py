@@ -14,6 +14,7 @@ from joblib import Memory, Parallel, delayed
 from scipy.spatial.distance import cdist
 
 from bg3dtools.mesh.laplace import biharmonic_embedding
+from bg3dtools.mesh.utils import match_index_dtype
 
 # To have a cache for computations which are taking time to complete
 memory = Memory(location=".joblib_cache", verbose=0)
@@ -181,7 +182,11 @@ def geodesic_matrix(
     if i2.size == 0:
         i2 = i1
 
-    func = lambda i: igl.exact_geodesic(v, f, np.array([i]), i2)
+    # libigl requires the source/target index arrays to share f's integer dtype
+    # (else it raises on hosts where NumPy's default int differs from f's, e.g.
+    # int32 faces vs int64 indices on Windows). Harmonize both to f.dtype.
+    i2 = match_index_dtype(f, i2)
+    func = lambda i: igl.exact_geodesic(v, f, match_index_dtype(f, np.array([i])), i2)
     d = Parallel(n_jobs=-1)(delayed(func)(j) for j in i1)
     return np.stack(d)
 

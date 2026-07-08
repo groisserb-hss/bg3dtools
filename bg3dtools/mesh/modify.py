@@ -9,6 +9,8 @@ from typing import Optional, Tuple, Union
 import numpy as np
 import igl
 
+from bg3dtools.mesh.utils import as_igl_faces
+
 __all__ = [
     "edge_neighbors",
     "split_edge",
@@ -39,6 +41,9 @@ def edge_neighbors(
         Indices of the two neighboring faces for each edge.
         Value is -1 for boundary edges with only one neighbor.
     """
+    # int64 chokepoint: is_edge_manifold / triangle_triangle_adjacency misbehave on the int32
+    # faces that libigl's decimate/upsample/bfs_orient return on the Windows wheel.
+    faces = as_igl_faces(faces)
     assert igl.is_edge_manifold(faces)
 
     if face_adjacency is None:
@@ -154,7 +159,7 @@ def split_edge(
         faces = np.vstack([faces] + new_face_list)
         if ftex is not None:
             ftex = np.vstack([ftex] + new_ftex_list)
-    faces = igl.bfs_orient(faces)[0]
+    faces = as_igl_faces(igl.bfs_orient(faces)[0])  # bfs_orient returns int32 on the Windows wheel
 
     if vtex is None and ftex is None:
         return verts, faces
@@ -249,20 +254,25 @@ def resize_to_num_verts(
     """
     assert igl.is_edge_manifold(faces), "Mesh must be edge manifold"
 
+    # igl.upsample/decimate return int32 faces on the Windows wheel; pin int64 after each so the
+    # downstream is_edge_manifold checks (here and in edge_neighbors) never see int32.
     # if we have fewer faces than the target number of vertices, upsample by splitting faces
     while len(verts) < 0.98 * target_N:
         verts, faces = igl.upsample(verts, faces)
+        faces = as_igl_faces(faces)
 
     # first pass on decimation, keep 3 extra faces to try not to overshoot
     target_M = int(target_N / len(verts) * len(faces)) + 3
     if target_M < len(faces):
         sucess, verts, faces, _, _ = igl.decimate(verts, faces, target_M)
+        faces = as_igl_faces(faces)
         assert sucess, "libigl decimation failed"
 
     # subsequent decimations try to hit the target number of vertices exactly
     while len(verts) > target_N:
         extra_verts = len(verts) - target_N
         sucess, verts, faces, _, _ = igl.decimate(verts, faces, len(faces) - 2*extra_verts)
+        faces = as_igl_faces(faces)
         assert sucess, "libigl decimation failed"
 
     # if we overshot, add vertices back in by edge splitting

@@ -33,7 +33,51 @@ __all__ = [
     "sample_obj_vtex",
     "get_genus",
     "geodesic_submesh",
+    "match_index_dtype",
 ]
+
+
+def match_index_dtype(faces: np.ndarray, *arrays: np.ndarray):
+    """Coerce integer index *arrays* to ``faces``'s integer dtype.
+
+    libigl's pybind bindings require every *array* integer argument of a call
+    (the faces ``f`` plus any vertex-index arrays such as ``exact_geodesic``'s
+    source/target sets ``vs``/``vt``) to share ONE integer dtype, else they
+    reject the call with::
+
+        ValueError: Invalid type (int64, Row Major) for argument 'vs'.
+        Expected it to match argument 'f' which is of type (int32, Row Major).
+
+    NumPy's default integer differs by platform (int64 on Linux/macOS, int32 on
+    Windows) and mesh I/O can mix the two, so the mismatch only ever surfaces on
+    some hosts. Routing index arrays through here guarantees consistency
+    regardless of platform or provenance. (Scalar index arguments — e.g.
+    ``point_simplex_squared_distance``'s face index — are *not* affected by this
+    matching and need no coercion.)
+
+    Returns a single array when one is given, else a list in argument order.
+    """
+    dt = faces.dtype if faces.dtype.kind in 'iu' else np.dtype(np.int64)
+    out = [np.ascontiguousarray(a, dtype=dt) for a in arrays]
+    return out[0] if len(out) == 1 else out
+
+
+def as_igl_faces(faces: np.ndarray) -> np.ndarray:
+    """Canonicalize a face array to C-contiguous int64 for libigl.
+
+    The class-2 companion to :func:`match_index_dtype`. Several libigl functions
+    *return* faces in a platform-dependent integer dtype -- notably the Windows wheel's
+    ``remove_unreferenced`` / ``collapse_small_triangles`` / ``decimate`` / ``upsample`` /
+    ``bfs_orient`` hand back int32 regardless of input dtype -- and feeding int32 faces to
+    predicates like ``is_edge_manifold`` / ``all_boundary_loop`` / ``is_vertex_manifold``
+    makes them report spurious non-manifoldness. Route faces coming out of (or into) such
+    calls through here so every libigl boundary sees one dtype regardless of platform or
+    provenance.
+
+    Unlike ``match_index_dtype`` (which coerces to *faces' own* dtype, possibly int32),
+    this always forces int64 -- the dtype these predicates behave correctly on.
+    """
+    return np.ascontiguousarray(faces, dtype=np.int64)
 
 
 def extract_manifold_patches(
@@ -152,7 +196,9 @@ def submesh(
     f_idx = f_idx[seder]
     new_verts, new_faces, _, v_idx = igl.remove_unreferenced(old_verts, sub_faces)
     new_verts = new_verts.reshape([-1, n])
-    new_faces = new_faces.reshape([-1, m])
+    # remove_unreferenced returns int32 faces on some libigl wheels (Windows) regardless of
+    # input dtype; pin int64 so every submesh consumer feeds int64 to downstream igl predicates.
+    new_faces = as_igl_faces(new_faces.reshape([-1, m]))
 
     if return_indices:
         return new_verts, new_faces, f_idx, v_idx
@@ -515,8 +561,8 @@ def ordered_edges(faces: np.ndarray) -> np.ndarray:
     edges : (nE, 2) ndarray
         Sorted edge list for consistency with MATLAB ordering.
     """
-    edges = igl.edges(faces.astype(np.int32))
-    idx = np.lexsort(edges[:, [1, 0]].T)  # for consistency with matlab edges
+    edges = igl.edges(as_igl_faces(faces))  # int64: match the repo-wide face dtype so the
+    idx = np.lexsort(edges[:, [1, 0]].T)    # returned edges never seed an int32/int64 mismatch
     return edges[idx, :]
 
 

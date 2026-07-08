@@ -18,6 +18,7 @@ from scipy import sparse
 
 from . import geometric_utilities as util
 from bg3dtools.mesh.mesh_io import read_triangle_mesh
+from bg3dtools.mesh.utils import as_igl_faces
 from bg3dtools.mesh.laplace import laplace_eigen_decomposition, gaussian_curvature
 from bg3dtools.mesh.laplace import cotangent_weights, fem_mass_matrix
 
@@ -39,7 +40,10 @@ class Mesh:
         type: str = "",
     ) -> None:
         self.__v = v  # Vertices
-        self.__f = f  # Faces
+        # Canonicalize faces to int64 (only the reader path did so before): the .npz, from_vedo,
+        # and direct Mesh(v, f) paths otherwise leave int32 faces on Windows, which makes the
+        # igl predicates used across this class (boundary_loop, ...) misbehave.
+        self.__f = as_igl_faces(f) if np.size(f) else f  # Faces
         self.__g = g  # Geodesic Matrix
         self.__s = s  # Signature Functions
         self.__num_eigenvectors = (

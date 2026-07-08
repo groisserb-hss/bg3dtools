@@ -13,7 +13,7 @@ import numpy as np
 from typing import Tuple, Optional, Union
 import scipy.sparse as sparse
 
-from bg3dtools.mesh.utils import submesh, sample_E2V, mesh_volume, extract_manifold_patches
+from bg3dtools.mesh.utils import submesh, sample_E2V, mesh_volume, extract_manifold_patches, as_igl_faces
 
 log = logging.getLogger(__name__)
 
@@ -371,6 +371,7 @@ def fill_hole_safe(
     faces : (nF', 3) ndarray
         Faces with the hole closed.
     """
+    faces = as_igl_faces(faces)  # int64: is_edge_manifold misbehaves on int32 (Windows wheel)
     if igl.is_edge_manifold(faces):
         try:
             candidate = fill_hole(verts, faces, boundary_vidx)
@@ -512,6 +513,7 @@ def close_end_caps(
         Total number of large loops detected. Equals `n_expected` in the
         happy case; differs when topology is unexpected.
     """
+    faces = as_igl_faces(faces)  # int64: all_boundary_loop misbehaves on int32 (Windows wheel)
     loops = igl.all_boundary_loop(faces)
     if not loops:
         return verts, faces, 0
@@ -676,10 +678,12 @@ def make_manifold(
     Once the loop converges to a closed, edge-manifold, vertex-manifold
     state, `collapse_small_triangles` runs *once* to clean up thin
     slivers introduced by fan triangulation. Any new boundaries created
-    by the collapse are fan-filled in a single follow-up pass; the final
-    state is re-verified. The function raises `RuntimeError` if the
-    output cannot be brought to a manifold + closed state — no silent
-    non-manifold fallback.
+    by the collapse are fan-filled in a single follow-up pass and the
+    result re-verified; if that cosmetic collapse cannot be kept manifold
+    + closed it is discarded in favour of the (already manifold + closed)
+    pre-collapse mesh. The function only raises `RuntimeError` if the main
+    repair loop itself fails to reach a manifold + closed state — it never
+    returns a non-manifold mesh.
 
     Parameters
     ----------
@@ -719,9 +723,10 @@ def make_manifold(
     Raises
     ------
     RuntimeError
-        If the mesh cannot be brought to a manifold + closed state
-        within `max_iters` iterations, or if the post-loop collapse
-        breaks manifoldness in a way that one repair pass cannot fix.
+        If the main repair loop cannot bring the mesh to a manifold +
+        closed state within `max_iters` iterations. A post-loop collapse
+        that breaks manifoldness is non-fatal: the pre-collapse mesh is
+        kept instead.
     """
 
     def _largest_patch(verts, faces, vtex, ftex):
@@ -736,6 +741,9 @@ def make_manifold(
         return verts, faces, vtex, ftex
 
     def _is_manifold_and_closed(faces):
+        # all_boundary_loop / is_edge_manifold report spurious non-manifoldness on the int32
+        # faces the Windows wheel returns from the in-loop submesh/bfs_orient calls; pin int64.
+        faces = as_igl_faces(faces)
         return (not igl.all_boundary_loop(faces)
                 and igl.is_edge_manifold(faces)
                 and nonmanifold_verts(faces)[0].size == 0)
@@ -769,6 +777,10 @@ def make_manifold(
                     np.full((added_faces, ftex.shape[1]), np.nan, dtype=ftex.dtype),
                 ])
         return verts, faces, vtex, ftex
+
+    # libigl returns int32 faces on some wheels (Windows) and the manifold predicates
+    # below misbehave on int32; canonicalize once up front so the whole routine stays int64.
+    faces = as_igl_faces(faces)
 
     # Initial: keep only the largest manifold patch.
     verts, faces, vtex, ftex = _largest_patch(verts, faces, vtex, ftex)
@@ -844,20 +856,42 @@ def make_manifold(
     # follow-up fan-fill in case collapse created new boundaries.
     a = (np.min(igl.doublearea(verts, faces)) / bounding_box_diagonal(verts) ** 2) / 2
     if a < area_thresh:
+        # The main loop above already produced a manifold + closed mesh;
+        # this collapse is only cosmetic thin-sliver cleanup. Pin int64
+        # face indices across it: some libigl wheels (notably the Windows
+        # build) return int32 faces from collapse_small_triangles /
+        # remove_unreferenced, and those int32 arrays then make the
+        # downstream manifold checks report spurious non-manifoldness --
+        # the same dtype sensitivity the is_vertex_manifold call in
+        # nonmanifold_verts() already guards against. Snapshot the
+        # known-good pre-collapse mesh first so a still-failing collapse
+        # can fall back to it rather than aborting the whole pipeline.
+        faces = np.ascontiguousarray(faces, dtype=np.int64)
+        safe = (verts, faces, vtex, ftex)
         f_map = {tuple(f): idx for idx, f in enumerate(faces)}
-        collapsed = igl.collapse_small_triangles(verts, faces, area_thresh)
+        collapsed = np.ascontiguousarray(
+            igl.collapse_small_triangles(verts, faces, area_thresh), dtype=np.int64)
         if ftex is not None:
             ftex = ftex[[f_map[tuple(fc)] for fc in collapsed]]
         verts, faces, i, j = igl.remove_unreferenced(verts, collapsed)
+        faces = np.ascontiguousarray(faces, dtype=np.int64)
         if vtex is not None:
             vtex = vtex[j]
         # Collapse may have opened new tiny boundaries; close them once.
         verts, faces, vtex, ftex = _fill_all_boundaries(verts, faces, vtex, ftex)
+        faces = np.ascontiguousarray(faces, dtype=np.int64)
         if not _is_manifold_and_closed(faces):
-            raise RuntimeError(
-                'make_manifold: post-collapse repair could not restore '
-                'manifold + closed state'
+            # The cosmetic collapse could not be kept manifold + closed.
+            # Discard it and keep the pre-collapse mesh (still manifold +
+            # closed, only with the thin slivers left uncollapsed) rather
+            # than failing the whole run.
+            log.warning(
+                'make_manifold: small-triangle collapse could not be kept '
+                'manifold + closed; retaining the pre-collapse mesh '
+                '(%d verts, %d faces, thin slivers uncollapsed).',
+                len(safe[0]), len(safe[1]),
             )
+            verts, faces, vtex, ftex = safe
 
     if double_check:
         assert igl.is_edge_manifold(faces)

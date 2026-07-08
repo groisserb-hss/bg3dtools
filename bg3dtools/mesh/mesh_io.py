@@ -64,7 +64,11 @@ def read_triangle_mesh(
     if isinstance(mesh, trimesh.PointCloud):
         f = np.empty((0, 3), dtype=np.int64)
     else:
-        f = np.ascontiguousarray(mesh.faces)
+        # int64 is the canonical face index dtype across bg3dtools: it matches
+        # NumPy's default integer on Linux/macOS and igl's read/qslim/decimate
+        # outputs, so faces never mismatch query-index arrays in libigl calls
+        # (see match_index_dtype in bg3dtools.mesh.utils).
+        f = np.ascontiguousarray(mesh.faces, dtype=np.int64)
     return v, f
 
 
@@ -319,7 +323,7 @@ def read_colored_plyfile(
     verts : (nV, 3) ndarray
         Vertex coordinates (float32).
     faces : (nF, 3) ndarray
-        Triangle indices (int32).
+        Triangle indices (int64).
     v_rgb : (nV, 3) ndarray, optional
         Vertex colors (uint8). Only if vert_colors=True and data exists.
     v_normals : (nV, 3) ndarray, optional
@@ -339,7 +343,7 @@ def read_colored_plyfile(
     vdata = plydata['vertex'].data
     verts = np.vstack([vdata['x'], vdata['y'], vdata['z']]).T.astype(np.float32)
 
-    faces = np.vstack(plydata['face'].data['vertex_indices']).astype(np.int32)
+    faces = np.vstack(plydata['face'].data['vertex_indices']).astype(np.int64)
 
     out = [verts, faces]
 

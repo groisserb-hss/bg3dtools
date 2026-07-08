@@ -92,8 +92,10 @@ except ImportError:
 from .scan import (  # noqa: E402
     Wireframe, PointCloudSpec, Skeleton, Floor, CameraFrustum, Mesh, Lines, _RawGeom,
     GeometrySpec, CameraParams, RenderStyle, RenderOptions, render_scan, render_frame,
+    RenderUnavailable,
 )
 __all__.extend([
     "Wireframe", "PointCloudSpec", "Skeleton", "Floor", "CameraFrustum", "Mesh", "Lines",
     "GeometrySpec", "CameraParams", "RenderStyle", "RenderOptions", "render_scan", "render_frame",
+    "RenderUnavailable",
 ])
