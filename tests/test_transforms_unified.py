@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation as ScipyR
 
 from bg3dtools.transforms_unified import (
     rigid_reg,
+    rigid_reg_robust,
     spherical_to_cartesian,
     cartesian_to_spherical,
     transform_points_forward,
@@ -307,6 +308,61 @@ class TestRigidRegTorch:
                 aff_torch.numpy(), aff_np, atol=1e-9,
                 err_msg=f"Mismatch at seed={seed}",
             )
+
+
+class TestRigidRegWeightedRobust:
+
+    def test_weighted_known_answer(self):
+        """Weighted rigid_reg recovers a known R+t (clean data -> any weights agree)."""
+        R = _random_rotation(); t = np.array([1.0, -2.0, 0.5])
+        source = _random_points(80, seed=11); dest = (R @ source.T).T + t
+        w = np.random.default_rng(0).random(80) + 0.1
+        aff = rigid_reg(source, dest, weights=w)
+        np.testing.assert_allclose(aff[:3, :3], R, atol=ATOL)
+        np.testing.assert_allclose(aff[:3, 3], t, atol=ATOL)
+
+    def test_weights_downweight_outlier(self):
+        """A point given ~0 weight is ignored -> a gross outlier doesn't bias the fit."""
+        R = _random_rotation(); t = np.array([0.0, 1.0, -1.0])
+        source = _random_points(60, seed=12); dest = (R @ source.T).T + t
+        dest[0] += 100.0                                     # gross outlier
+        w = np.ones(60); w[0] = 1e-9
+        aff = rigid_reg(source, dest, weights=w)
+        np.testing.assert_allclose(aff[:3, :3], R, atol=1e-6)
+        np.testing.assert_allclose(aff[:3, 3], t, atol=1e-6)
+
+    def test_robust_rejects_outliers(self):
+        """rigid_reg_robust recovers the transform despite 15% gross outliers."""
+        rng = np.random.default_rng(3)
+        R = _random_rotation(); t = np.array([2.0, -1.0, 0.5])
+        source = _random_points(200, seed=13); dest = (R @ source.T).T + t
+        dest += rng.standard_normal(dest.shape) * 0.001
+        dest[:30] += rng.standard_normal((30, 3)) * 10.0
+        aff = rigid_reg_robust(source, dest, iters=3)
+        np.testing.assert_allclose(aff[:3, :3], R, atol=1e-2)
+        np.testing.assert_allclose(aff[:3, 3], t, atol=1e-2)
+
+    def test_weighted_parity_with_numpy(self):
+        """torch and numpy weighted rigid_reg agree."""
+        torch = pytest.importorskip("torch")
+        source = _random_points(120, seed=14)
+        R = _random_rotation(); t = np.array([1.0, 2.0, 3.0])
+        dest = (R @ source.T).T + t + np.random.default_rng(1).standard_normal((120, 3)) * 0.01
+        w = np.random.default_rng(2).random(120) + 0.1
+        aff_np = rigid_reg(source, dest, weights=w)
+        aff_t = rigid_reg(torch.from_numpy(source), torch.from_numpy(dest), weights=torch.from_numpy(w))
+        np.testing.assert_allclose(aff_t.numpy(), aff_np, atol=1e-9)
+
+    def test_robust_parity_with_numpy(self):
+        """torch and numpy rigid_reg_robust agree (median via quantile)."""
+        torch = pytest.importorskip("torch")
+        rng = np.random.default_rng(5)
+        source = _random_points(150, seed=15)
+        R = _random_rotation(); t = np.array([0.5, -2.0, 1.0])
+        dest = (R @ source.T).T + t; dest[:20] += rng.standard_normal((20, 3)) * 8.0
+        aff_np = rigid_reg_robust(source, dest, iters=3)
+        aff_t = rigid_reg_robust(torch.from_numpy(source), torch.from_numpy(dest), iters=3)
+        np.testing.assert_allclose(aff_t.numpy(), aff_np, atol=1e-9)
 
 
 class TestSphericalToCartesianTorch:

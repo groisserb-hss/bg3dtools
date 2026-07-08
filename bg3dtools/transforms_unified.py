@@ -722,6 +722,7 @@ def rigid_reg(
     source: ArrayLike,
     dest: ArrayLike,
     scale: bool = False,
+    weights: "Optional[ArrayLike]" = None,
     return_aligned: bool = False,
     bk=None,
 ) -> Union[ArrayLike, tuple]:
@@ -742,6 +743,10 @@ def rigid_reg(
         Destination points to align to.
     scale : bool, optional
         If True, allow uniform scaling. Default is False.
+    weights : (N,) array, optional
+        Per-point weights for a weighted least-squares (weighted Kabsch /
+        Procrustes) fit.  None -> uniform weights (standard Kabsch).  Filtered
+        to the same valid rows as *source*/*dest*.
     return_aligned : bool, optional
         If True, also return the aligned source points. Default is False.
     bk : optional
@@ -777,14 +782,20 @@ def rigid_reg(
             return aff, bk.copy(source)
         return aff
 
-    # 1. Compute centroids and centre the clouds
-    mu_src = bk.mean(src, axis=0)
-    mu_dst = bk.mean(dst, axis=0)
+    # 1. Compute (optionally weighted) centroids and centre the clouds
+    if weights is None:
+        mu_src = bk.mean(src, axis=0)
+        mu_dst = bk.mean(dst, axis=0)
+    else:
+        w = weights[valid]
+        w = w / bk.sum(w)
+        mu_src = bk.sum(w[:, None] * src, axis=0)
+        mu_dst = bk.sum(w[:, None] * dst, axis=0)
     src_c = src - mu_src
     dst_c = dst - mu_dst
 
-    # 2. Cross-covariance matrix
-    H = src_c.T @ dst_c  # (3, 3)
+    # 2. (Weighted) cross-covariance matrix
+    H = (src_c if weights is None else w[:, None] * src_c).T @ dst_c  # (3, 3)
 
     # 3. SVD of H
     U, S, Vt = bk.linalg.svd(H)
@@ -802,7 +813,8 @@ def rigid_reg(
 
     # 5. Optional uniform scale factor  s = trace(R @ H) / ||src_c||^2
     if scale:
-        s = bk.sum(S * sign_d) / bk.sum(src_c ** 2)
+        denom = bk.sum(src_c ** 2) if weights is None else bk.sum(w[:, None] * src_c ** 2)
+        s = bk.sum(S * sign_d) / denom
         R = s * R
 
     # 6. Translation  t = mu_dst - R @ mu_src
@@ -820,6 +832,53 @@ def rigid_reg(
     if return_aligned:
         aligned = transform_points_forward(aff, source, bk=bk)
         return aff, aligned
+    return aff
+
+
+def rigid_reg_robust(
+    source: ArrayLike,
+    dest: ArrayLike,
+    iters: int = 3,
+    scale: bool = False,
+    return_aligned: bool = False,
+    bk=None,
+) -> Union[ArrayLike, tuple]:
+    """
+    Robust rigid registration via IRLS on top of :func:`rigid_reg`.
+
+    Solves the unweighted fit, then `iters` times reweights each point by a
+    Cauchy weight ``1 / (1 + (r / median(r))**2)`` of its residual *r* and
+    re-solves the weighted fit.  Down-weights gross outliers (e.g. a deforming
+    sub-region) smoothly, with no hard inlier threshold.
+
+    NOTE: not differentiable (the median + reweighting are piecewise constant).
+    For a differentiable fit use :func:`rigid_reg` with fixed ``weights``.
+
+    Parameters
+    ----------
+    source, dest : (N, 3) arrays
+        Point sets; *source* is mapped onto *dest*.
+    iters : int, optional
+        Number of IRLS reweighting passes. Default is 3.
+    scale, return_aligned, bk :
+        As in :func:`rigid_reg`.
+
+    Returns
+    -------
+    aff : (4, 4) array
+    aligned : (N, 3) array, optional
+        Only when *return_aligned* is True.
+    """
+    if bk is None:
+        bk = infer_backend(source)
+    aff = rigid_reg(source, dest, scale=scale, bk=bk)
+    for _ in range(iters):
+        r = bk.sqrt(bk.sum((transform_points_forward(aff, source, bk=bk) - dest) ** 2, axis=1))
+        med = np.median(r) if bk is np else __import__("torch").quantile(r, 0.5)  # quantile == np.median (even N)
+        w = 1.0 / (1.0 + (r / (med + 1e-9)) ** 2)
+        aff = rigid_reg(source, dest, scale=scale, weights=w, bk=bk)
+    if return_aligned:
+        return aff, transform_points_forward(aff, source, bk=bk)
     return aff
 
 
