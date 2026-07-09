@@ -54,15 +54,36 @@ def save_image(path, image):
         raise OSError('Failed to save image: %s' % path)
 
 
-@retry_netfs
 def save_video(path, array, fps=30, codec='libx264', format='mp4'):
+    """Encode to a local temp file, then copy to *path* with retry.
+
+    ffmpeg writing directly to a stale network mount blocks in kernel I/O
+    without raising, which no retry decorator can catch; only the final
+    ``copy_file`` touches the network (and carries its own retry).
+    """
+    import os
+    import tempfile
     import imageio.v2 as imageio
 
+    from .filesystem import copy_file
+
     log = logging.getLogger(__name__)
+    suffix = os.path.splitext(str(path))[1] or ('.%s' % format)
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    # mkstemp creates 0600; copy preserves mode, so widen to the umask
+    # default an ordinary file write would have gotten.
+    umask = os.umask(0)
+    os.umask(umask)
+    os.chmod(tmp_path, 0o666 & ~umask)
     try:
-        with imageio.get_writer(path, fps=fps, codec=codec, format=format) as writer:
+        with imageio.get_writer(tmp_path, fps=fps, codec=codec, format=format) as writer:
             for frame in array:
                 writer.append_data(frame)
+        copy_file(tmp_path, path)
     except Exception as e:
         log.error('Failed to save %s' % path)
         raise
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)

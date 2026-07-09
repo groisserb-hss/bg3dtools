@@ -5,6 +5,8 @@ This module provides functions for reading and writing video files
 using imageio as backend.
 """
 
+import os
+import tempfile
 from collections.abc import Iterable
 from typing import Iterator, List
 import imageio
@@ -52,20 +54,42 @@ def save_video(
         RGB frames. Values in [0, 1] are scaled to [0, 255].
     fps : int
         Frames per second for output video.
+
+    Notes
+    -----
+    Encodes to a local temporary file, then copies to *video_path*. ffmpeg
+    writing directly to a stale network mount blocks in kernel I/O without
+    raising (imageio waits forever for it to exit); encoding locally keeps
+    the network I/O in Python where ``copy_file`` can retry it.
     """
-    writer = imageio.get_writer(str(video_path), fps=float(fps))
+    suffix = os.path.splitext(str(video_path))[1] or '.mp4'
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    # mkstemp creates 0600; copy preserves mode, so widen to the umask
+    # default an ordinary file write would have gotten.
+    umask = os.umask(0)
+    os.umask(umask)
+    os.chmod(tmp_path, 0o666 & ~umask)
     try:
+        writer = imageio.get_writer(tmp_path, fps=float(fps))
+        try:
 
-        rgb_data = list(rgb_data)
-        if max(f.max() for f in rgb_data) <= 1.0:
-            rgb_data = [255*f for f in rgb_data]
+            rgb_data = list(rgb_data)
+            if max(f.max() for f in rgb_data) <= 1.0:
+                rgb_data = [255*f for f in rgb_data]
 
-        for fr in rgb_data:
-            # Expect RGB uint8; convert if needed
-            fr_u8 = fr.astype(np.uint8, copy=False)
-            writer.append_data(fr_u8)
+            for fr in rgb_data:
+                # Expect RGB uint8; convert if needed
+                fr_u8 = fr.astype(np.uint8, copy=False)
+                writer.append_data(fr_u8)
+        finally:
+            writer.close()
+
+        from bg3dtools.utils.cifs_wrappers.filesystem import copy_file
+        copy_file(tmp_path, str(video_path))
     finally:
-        writer.close()
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def load_video(video_path: str) -> List[np.ndarray]:
