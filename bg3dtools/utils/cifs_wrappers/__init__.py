@@ -10,7 +10,7 @@ All functions use exponential backoff retry logic for robustness.
 
 from ._retry import is_host_down, retry_netfs
 from .numpy import save_np, save_npz, load_np, save_csv, load_csv
-from .image import load_image, save_image, save_video
+from .image import load_image, image_dims, save_image, save_video
 from .mesh import read_mesh, read_plydata, write_plydata
 from .filesystem import (
     copy_file,
@@ -40,6 +40,7 @@ __all__ = [
     "load_csv",
     # image
     "load_image",
+    "image_dims",
     "save_image",
     "save_video",
     # mesh

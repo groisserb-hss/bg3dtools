@@ -4,7 +4,7 @@ import logging
 
 from ._retry import retry_netfs
 
-__all__ = ["load_image", "save_image", "save_video"]
+__all__ = ["load_image", "image_dims", "save_image", "save_video"]
 
 
 @retry_netfs
@@ -28,6 +28,20 @@ def load_image(path):
     if img is None:
         raise OSError('Failed to load image: %s' % path)
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+@retry_netfs
+def image_dims(path):
+    """Return (width, height) of an image by reading only its header.
+
+    ``PIL.Image.open`` is lazy — it parses the header without decoding pixel
+    data, so this reads a few KB instead of the whole file. Use instead of
+    ``load_image(...).shape`` when only the dimensions are needed (full-res
+    images on network mounts are expensive to pull and decode).
+    """
+    from PIL import Image
+    with Image.open(path) as im:
+        return im.size
 
 
 @retry_netfs
