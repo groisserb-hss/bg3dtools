@@ -26,6 +26,7 @@ from mediapipe.tasks.python.core.base_options import BaseOptions
 from scipy.signal import savgol_filter
 
 from .resource_paths import landmarker_weights
+from ._delegate import create_detector
 from .human_segmentation import create_mp_segmenter
 from .deidentify import deidentify_face_rgb, create_tasks_face_detector, create_opencv_face_cascade
 from .joint_annotations import BlazePoseLandmark
@@ -126,23 +127,30 @@ def smooth_keypoints(
     return out
 
 
-def get_mediapipe_detector(video: bool = True, model_asset_path: Optional[str] = None):
-    """Create a MediaPipe PoseLandmarker using the modern Tasks API."""
+def get_mediapipe_detector(video: bool = True, model_asset_path: Optional[str] = None,
+                           use_gpu=None):
+    """Create a MediaPipe PoseLandmarker using the modern Tasks API.
+
+    use_gpu: None -> decide from MEDIAPIPE_DISABLE_GPU env (default GPU when
+    available); True/False -> force. Falls back to CPU if the GPU (OpenGL)
+    delegate cannot be created on this platform.
+    """
     running_mode = mp_vision.RunningMode.VIDEO if video else mp_vision.RunningMode.IMAGE
 
     if model_asset_path is None:
         model_asset_path = landmarker_weights
     assert os.path.isfile(model_asset_path), 'Failed to load model weights from %s' % model_asset_path
 
-    options = mp_vision.PoseLandmarkerOptions(
-        base_options=BaseOptions(model_asset_path=model_asset_path),
-        running_mode=running_mode,
-    )
+    def _build(delegate):
+        options = mp_vision.PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path=model_asset_path, delegate=delegate),
+            running_mode=running_mode,
+        )
+        # Suppress C++ logs during model creation
+        with SuppressCppStderr():
+            return mp_vision.PoseLandmarker.create_from_options(options)
 
-    # Suppress C++ logs during model creation
-    with SuppressCppStderr():
-        detector = mp_vision.PoseLandmarker.create_from_options(options)
-    return detector
+    return create_detector(_build, use_gpu=use_gpu, what="PoseLandmarker")
 
 
 def landmark_video(video_generator,
@@ -150,7 +158,8 @@ def landmark_video(video_generator,
                    smooth: bool = True,
                    deidentify: bool = False,
                    segment: bool = False,
-                   target_frames: Optional[int] = None) -> 'LandmarkVideoResult':
+                   target_frames: Optional[int] = None,
+                   use_gpu=None) -> 'LandmarkVideoResult':
     """
     Process a video and extract BlazePose landmarks.
 
@@ -161,22 +170,26 @@ def landmark_video(video_generator,
         deidentify: Blur faces in output video.
         segment: Generate body segmentation masks.
         target_frames: Number of frames to process (None = all).
+        use_gpu: MediaPipe delegate selection. None -> decide from the
+            MEDIAPIPE_DISABLE_GPU env var (default: GPU when available);
+            True/False -> force. Falls back to CPU if the GPU (OpenGL)
+            delegate is unavailable on this platform.
 
     Returns:
         LandmarkVideoResult with blaze_2d, blaze_3d, and optionally
         deidentified video and body_masks.
     """
     log = logging.getLogger('PoseLandmarkDetector')
-    detector = get_mediapipe_detector(video=True)
+    detector = get_mediapipe_detector(video=True, use_gpu=use_gpu)
     num_kp = len(BlazePoseLandmark)
 
     # Optional face de-identification resources.
     face_cascade = mp_face_detector = mp_segmenter = None
     if deidentify:
         face_cascade = create_opencv_face_cascade()
-        mp_face_detector = create_tasks_face_detector(video=True)
+        mp_face_detector = create_tasks_face_detector(video=True, use_gpu=use_gpu)
     if segment:
-        mp_segmenter = create_mp_segmenter()
+        mp_segmenter = create_mp_segmenter(use_gpu=use_gpu)
 
     warn_no_landmarks = 0
     warn_no_face = 0
