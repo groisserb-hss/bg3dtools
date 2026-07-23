@@ -26,7 +26,7 @@ from .filesystem import (
     getsize,
     touch,
 )
-from .misc import load_mat, save_mat, dump_json, load_json, read_text, write_text
+from .misc import load_mat, save_mat, dump_json, load_json, read_text, read_bytes, write_text
 
 __all__ = [
     # retry
@@ -66,5 +66,6 @@ __all__ = [
     "dump_json",
     "load_json",
     "read_text",
+    "read_bytes",
     "write_text",
 ]

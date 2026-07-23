@@ -61,15 +61,33 @@ def load_json(path):
 
 @retry_netfs
 def read_text(path):
-    """Read a text file and return its contents as a string."""
+    """Read a text file and return its contents as a string.
+
+    Uses the platform default encoding — for files whose encoding is unknown
+    or mixed (e.g. vendor files with latin-1 comment bytes), use read_bytes()
+    and decode explicitly.
+    """
     log = logging.getLogger(__name__)
     try:
         with open(path, 'r') as f:
             text = f.read()
     except Exception as e:
-        log.error('Failed to read %s' % path)
+        log.error('Failed to read %s: %r' % (path, e))
         raise
     return text
+
+
+@retry_netfs
+def read_bytes(path):
+    """Read a file and return its raw bytes (caller controls decoding)."""
+    log = logging.getLogger(__name__)
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except Exception as e:
+        log.error('Failed to read %s: %r' % (path, e))
+        raise
+    return data
 
 
 @retry_netfs
