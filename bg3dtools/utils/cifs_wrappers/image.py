@@ -85,8 +85,10 @@ def save_video(path, array, fps=30, codec='libx264', format='mp4'):
     suffix = os.path.splitext(str(path))[1] or ('.%s' % format)
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
-    # mkstemp creates 0600; copy preserves mode, so widen to the umask
-    # default an ordinary file write would have gotten.
+    # mkstemp creates 0600. Now that copy_file uses copyfile (not copy2), the
+    # destination is created by open(dst,'wb') and picks up 0o666 & ~umask on its
+    # own, so this chmod no longer affects the result -- it is kept only so the
+    # temp file itself isn't 0600 while it's being written.
     umask = os.umask(0)
     os.umask(umask)
     os.chmod(tmp_path, 0o666 & ~umask)

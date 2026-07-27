@@ -4,7 +4,7 @@ import logging
 
 from ._retry import retry_netfs
 
-__all__ = ["load_mat", "save_mat", "dump_json", "load_json", "read_text", "write_text"]
+__all__ = ["load_mat", "save_mat", "dump_json", "load_json", "read_text", "read_bytes", "write_text"]
 
 
 @retry_netfs
