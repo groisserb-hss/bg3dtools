@@ -22,12 +22,17 @@ __all__ = [
 
 @retry_netfs
 def copy_file(src: str, dst: str):
+    # copyfile, NOT copy2: copy2's copystat() sets explicit timestamps on dst,
+    # which the kernel only allows for the file's owner — on CIFS mounts with
+    # forceuid mapping files to another uid (e.g. the Azure Files data shares),
+    # that utime raises EPERM after the data has already copied. We never need
+    # source metadata on the destination (sources are typically tempfiles).
     import shutil
     log = logging.getLogger(__name__)
     try:
-        shutil.copy2(src, dst)
+        shutil.copyfile(src, dst)
     except Exception as e:
-        log.error('Failed to copy %s to %s' % (src, dst))
+        log.error('Failed to copy %s to %s: %r' % (src, dst, e))
         raise
 
 
@@ -38,7 +43,7 @@ def remove_tree(path: str):
     try:
         shutil.rmtree(path)
     except Exception as e:
-        log.error('Failed to remove %s' % path)
+        log.error('Failed to remove %s: %r' % (path, e))
         raise
 
 
@@ -50,7 +55,7 @@ def isfile(path):
     try:
         flag = os.path.isfile(path)
     except Exception as e:
-        log.error('Failed to find %s' % path)
+        log.error('Failed to find %s: %r' % (path, e))
         raise
     return flag
 
@@ -63,7 +68,7 @@ def isdir(path):
     try:
         flag = os.path.isdir(path)
     except Exception as e:
-        log.error('Failed to find %s' % path)
+        log.error('Failed to find %s: %r' % (path, e))
         raise
     return flag
 
@@ -76,7 +81,7 @@ def makedirs(path, exist_ok=True):
     try:
         os.makedirs(path, exist_ok=exist_ok)
     except Exception as e:
-        log.error('Failed to make %s' % path)
+        log.error('Failed to make %s: %r' % (path, e))
         raise
 
 
@@ -88,7 +93,7 @@ def rename(src, dst):
     try:
         os.rename(src, dst)
     except Exception as e:
-        log.error('Failed to rename %s to %s' % (src, dst))
+        log.error('Failed to rename %s to %s: %r' % (src, dst, e))
         raise
 
 
@@ -100,7 +105,7 @@ def remove(path):
     try:
         os.remove(path)
     except Exception as e:
-        log.error('Failed to remove %s' % path)
+        log.error('Failed to remove %s: %r' % (path, e))
         raise
 
 
@@ -115,7 +120,7 @@ def listdir(path):
     try:
         listed = os.listdir(path)
     except Exception as e:
-        log.error('Failed to find %s' % path)
+        log.error('Failed to find %s: %r' % (path, e))
         raise
     return listed
 
@@ -129,7 +134,7 @@ def glob_path(directory, pattern):
     try:
         result = sorted(Path(directory).glob(pattern))
     except Exception as e:
-        log.error('Failed to glob %s/%s' % (directory, pattern))
+        log.error('Failed to glob %s/%s: %r' % (directory, pattern, e))
         raise
     return result
 
@@ -143,7 +148,7 @@ def getsize(path):
     try:
         size = os.path.getsize(path)
     except Exception as e:
-        log.error('Failed to get size of %s' % path)
+        log.error('Failed to get size of %s: %r' % (path, e))
         raise
     return size
 
@@ -156,5 +161,5 @@ def touch(path):
         with open(path, 'a') as f:
             pass
     except Exception as e:
-        log.error('Failed to touch %s' % path)
+        log.error('Failed to touch %s: %r' % (path, e))
         raise
