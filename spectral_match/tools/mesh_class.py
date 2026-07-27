@@ -275,7 +275,8 @@ class Mesh:
     @property
     def mass(self) -> sparse.spmatrix:
         if self.__mass.size == 0:
-            # igl.massmatrix is broken in igl 2.5.1 (returns all zeros)
+            # fem_mass_matrix, not igl.massmatrix: different normalisation, its
+            # diagonal sums to half igl's Voronoi one
             self.__mass = fem_mass_matrix(self.__v, self.__f)
         return self.__mass
 
@@ -288,7 +289,8 @@ class Mesh:
     @property
     def l(self) -> sparse.spmatrix:
         if self.__l.size == 0:
-            # igl.cotmatrix is broken in igl 2.5.1 (returns all zeros)
+            # Negated: cotangent_weights uses the opposite sign convention, so this
+            # equals igl_compat.cotmatrix (to 1e-15)
             self.__l = -cotangent_weights(self.v, self.f)
         return self.__l
 

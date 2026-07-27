@@ -100,10 +100,10 @@ def assert_float(a, shape=None):
 # module-level invariants
 # ---------------------------------------------------------------------------
 
-WRAPPERS = [
-    n for n in ic.__all__
-    if n not in ("AVAILABLE", "PER_VERTEX_NORMALS_WEIGHTING_TYPE_AREA")
-]
+#: The callable wrappers in ``__all__`` — excludes AVAILABLE and the re-exported
+#: igl constants (PER_VERTEX_NORMALS_WEIGHTING_TYPE_*, MASSMATRIX_TYPE_*), which
+#: are values rather than functions.
+WRAPPERS = [n for n in ic.__all__ if callable(getattr(ic, n))]
 
 
 def test_available_is_a_subset_of_all():
@@ -587,6 +587,113 @@ def test_cotmatrix_and_intrinsic_delaunay_cotmatrix():
     assert sp.issparse(ldd) and ldd.shape == (12, 12)
     assert_float(lengths, (20, 3))
     assert_index(faces, (20, 3))
+
+
+def _irregular_mesh():
+    """Irregular enough that Voronoi and barycentric vertex areas differ."""
+    v = np.array([[0., 0, 0], [3., 0, 0.2], [0., 1, 0.5], [-0.2, -2., 0.1],
+                  [1., 1., 2.0], [2., -1., 0.3]])
+    f = np.array([[0, 1, 2], [0, 2, 4], [0, 4, 1], [0, 3, 1], [0, 2, 3], [1, 5, 3]],
+                 dtype=np.int64)
+    return v, f
+
+
+def test_massmatrix_lumped_diagonal_sums_to_surface_area():
+    import scipy.sparse as sp
+    v, f = _irregular_mesh()
+    area = ic.doublearea(v, f).sum() / 2
+    for mtype in (ic.MASSMATRIX_TYPE_VORONOI, ic.MASSMATRIX_TYPE_BARYCENTRIC):
+        m = ic.massmatrix(v, f, mtype)
+        assert sp.issparse(m) and m.shape == (6, 6)
+        diag = np.asarray(m.diagonal()).ravel()
+        assert diag.sum() == pytest.approx(area)     # a lumped mass matrix partitions area
+        assert np.all(diag > 0)
+
+
+def test_massmatrix_defaults_to_voronoi():
+    """Both bindings default to MASSMATRIX_TYPE_DEFAULT, which is Voronoi for
+    triangles; the wrapper pins Voronoi rather than relying on that."""
+    v, f = _irregular_mesh()
+    np.testing.assert_allclose(
+        ic.massmatrix(v, f).diagonal(),
+        ic.massmatrix(v, f, ic.MASSMATRIX_TYPE_VORONOI).diagonal())
+
+
+def test_massmatrix_types_are_distinct():
+    """Voronoi and barycentric agree in total but not per vertex, so the type matters."""
+    v, f = _irregular_mesh()
+    vor = np.asarray(ic.massmatrix(v, f, ic.MASSMATRIX_TYPE_VORONOI).diagonal()).ravel()
+    bar = np.asarray(ic.massmatrix(v, f, ic.MASSMATRIX_TYPE_BARYCENTRIC).diagonal()).ravel()
+    full = ic.massmatrix(v, f, ic.MASSMATRIX_TYPE_FULL)
+    assert not np.allclose(vor, bar)
+    assert vor.sum() == pytest.approx(bar.sum())
+    assert full.nnz > len(v)                                   # unlumped: off-diagonals
+    assert np.asarray(full.diagonal()).sum() == pytest.approx(vor.sum() / 2)
+
+
+def test_massmatrix_accepts_int32_faces():
+    v, f = _irregular_mesh()
+    np.testing.assert_allclose(
+        ic.massmatrix(v, np.ascontiguousarray(f, np.int32)).diagonal(),
+        ic.massmatrix(v, f).diagonal())
+
+
+def test_cotmatrix_and_massmatrix_are_not_all_zeros():
+    """Pins the correction of a long-standing repo comment.
+
+    Several comments claimed igl.cotmatrix/igl.massmatrix "return all zeros" on
+    2.5.1. They do not, on either binding, for any input shape tried here — so the
+    hand-rolled mesh.laplace implementations are kept for their different
+    normalisation, not because igl's are broken.
+    """
+    for v, f in (_quad(), _icosahedron(), _irregular_mesh(), _nonmanifold_edge()):
+        for faces in (f, np.ascontiguousarray(f, np.int32)):
+            lap = np.asarray(ic.cotmatrix(v, faces).todense())
+            mass = np.asarray(ic.massmatrix(v, faces).todense())
+            assert np.any(lap != 0), "cotmatrix returned all zeros"
+            assert np.any(mass != 0), "massmatrix returned all zeros"
+            # a valid Laplacian annihilates constants
+            assert np.max(np.abs(lap.sum(axis=1))) < 1e-9
+
+
+def test_read_triangle_mesh_contract(tmp_path):
+    p = tmp_path / "quad.obj"
+    p.write_text("v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3\nf 1 3 4\n")
+    v, f = ic.read_triangle_mesh(p)
+    assert_float(v, (4, 3))
+    assert_index(f, (2, 3))
+    assert np.array_equal(f, [[0, 1, 2], [0, 2, 3]])
+    assert v[2] == pytest.approx([1.0, 1.0, 0.0])
+
+
+def test_read_triangle_mesh_single_face_stays_two_dimensional(tmp_path):
+    """2.5.1 squeezes F to (3,) for a one-triangle file; the contract is (nF, 3)."""
+    p = tmp_path / "tri.obj"
+    p.write_text("v 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\n")
+    v, f = ic.read_triangle_mesh(p)
+    assert_float(v, (3, 3))
+    assert_index(f, (1, 3))
+
+
+def test_read_triangle_mesh_roundtrips_write_triangle_mesh(tmp_path):
+    v, f = _icosahedron()
+    for ext in ("obj", "off", "ply"):
+        p = tmp_path / ("m." + ext)
+        assert ic.write_triangle_mesh(p, v, f) is True
+        v2, f2 = ic.read_triangle_mesh(p)
+        assert_float(v2, (12, 3))
+        assert_index(f2, (20, 3))
+        assert v2 == pytest.approx(v, abs=1e-6), ext
+        assert np.array_equal(f2, f), ext
+
+
+def test_read_triangle_mesh_accepts_str_and_pathlike(tmp_path):
+    p = tmp_path / "tri.obj"
+    p.write_text("v 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\n")
+    from_path = ic.read_triangle_mesh(p)
+    from_str = ic.read_triangle_mesh(str(p))
+    assert np.array_equal(from_path[0], from_str[0])
+    assert np.array_equal(from_path[1], from_str[1])
 
 
 def test_connected_components_takes_an_adjacency_matrix():

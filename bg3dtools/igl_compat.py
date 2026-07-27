@@ -68,6 +68,9 @@ import numpy as np
 
 __all__ = [
     "AVAILABLE",
+    "MASSMATRIX_TYPE_BARYCENTRIC",
+    "MASSMATRIX_TYPE_FULL",
+    "MASSMATRIX_TYPE_VORONOI",
     "PER_VERTEX_NORMALS_WEIGHTING_TYPE_AREA",
     "adjacency_matrix",
     "all_boundary_loop",
@@ -94,12 +97,14 @@ __all__ = [
     "is_edge_manifold",
     "is_vertex_manifold",
     "lscm",
+    "massmatrix",
     "per_face_normals",
     "per_vertex_normals",
     "point_mesh_squared_distance",
     "point_simplex_squared_distance",
     "random_points_on_mesh",
     "read_obj",
+    "read_triangle_mesh",
     "remove_duplicate_vertices",
     "remove_unreferenced",
     "resolve_duplicated_faces",
@@ -184,6 +189,7 @@ _intrinsic_delaunay_cotmatrix = _sym(
 _is_edge_manifold = _sym("is_edge_manifold", "is_edge_manifold")
 _is_vertex_manifold = _sym("is_vertex_manifold", "is_vertex_manifold")
 _lscm = _sym("lscm", "lscm")
+_massmatrix = _sym("massmatrix", "massmatrix")
 _per_face_normals = _sym("per_face_normals", "per_face_normals")
 _per_vertex_normals = _sym("per_vertex_normals", "per_vertex_normals")
 _point_mesh_squared_distance = _sym(
@@ -194,6 +200,7 @@ _point_simplex_squared_distance = _sym(
 )
 _random_points_on_mesh = _sym("random_points_on_mesh", "random_points_on_mesh")
 _read_obj = _sym("read_obj", "read_obj", "readOBJ")
+_read_triangle_mesh = _sym("read_triangle_mesh", "read_triangle_mesh")
 _remove_duplicate_vertices = _sym("remove_duplicate_vertices", "remove_duplicate_vertices")
 _remove_unreferenced = _sym("remove_unreferenced", "remove_unreferenced")
 _resolve_duplicated_faces = _sym("resolve_duplicated_faces", "resolve_duplicated_faces")
@@ -220,6 +227,14 @@ AVAILABLE = frozenset(_resolved)
 PER_VERTEX_NORMALS_WEIGHTING_TYPE_AREA = getattr(
     igl, "PER_VERTEX_NORMALS_WEIGHTING_TYPE_AREA", 1
 )
+
+#: Mass-matrix types for :func:`massmatrix`. Plain ``int`` in 2.5.1 and
+#: ``MassMatrixType`` enum members in 2.6.1 — both bindings accept either, with the
+#: same integer mapping (barycentric 0, Voronoi 1, full 2), so these are re-exported
+#: verbatim rather than normalized. Pass these rather than a literal.
+MASSMATRIX_TYPE_BARYCENTRIC = getattr(igl, "MASSMATRIX_TYPE_BARYCENTRIC", 0)
+MASSMATRIX_TYPE_VORONOI = getattr(igl, "MASSMATRIX_TYPE_VORONOI", 1)
+MASSMATRIX_TYPE_FULL = getattr(igl, "MASSMATRIX_TYPE_FULL", 2)
 
 
 # ---------------------------------------------------------------------------
@@ -684,17 +699,59 @@ def cotmatrix(v: np.ndarray, f: np.ndarray):
 
     Contract: ``(nV, nV)`` float64 scipy sparse matrix.
 
-    2.6: identical name and return type. Verified on both.
+    2.6: identical name, return type and values. Verified on both.
 
-    Warning
-    -------
-    Broken in igl 2.5.1 (returns all zeros on some meshes) — bg3dtools uses the
-    hand-rolled ``mesh.laplace.cotangent_weights`` instead. Wrapped only because
-    downstream consumers import it.
+    Notes
+    -----
+    bg3dtools computes its Laplacians with the hand-rolled
+    ``mesh.laplace.cotangent_weights`` instead of this. A long-standing comment
+    said that was because igl's version "returns all zeros" on 2.5.1; that is
+    **not reproducible** — see :func:`massmatrix` for the measurements. The two
+    agree to 1.3e-15 but with **opposite sign** (igl's is negative
+    semi-definite), so they are not interchangeable without a sign flip.
     """
     if _cotmatrix is None:
         _missing("cotmatrix", "cotmatrix")
     return _cotmatrix(_flt(v), _idx(f))
+
+
+def massmatrix(v: np.ndarray, f: np.ndarray, type=None):
+    """Mass matrix of a mesh (vertex areas on the diagonal, for lumped types).
+
+    Contract: ``(nV, nV)`` float64 scipy sparse matrix. *type* selects the
+    quadrature: pass one of :data:`MASSMATRIX_TYPE_VORONOI` (default),
+    :data:`MASSMATRIX_TYPE_BARYCENTRIC` or :data:`MASSMATRIX_TYPE_FULL`. The
+    first two are lumped (diagonal, and the diagonal sums to the surface area);
+    ``FULL`` is the unlumped Galerkin matrix, whose diagonal sums to half that.
+    Voronoi and barycentric differ per vertex on irregular meshes, so the choice
+    matters even though their totals agree.
+
+    The argument is named *type* to match libigl's own keyword; it shadows the
+    builtin only inside this signature.
+
+    2.6: same name, return type and values. The type constants became
+    ``MassMatrixType`` enum members, but the integer mapping is unchanged and both
+    bindings accept either form. Both bindings' own default is
+    ``MASSMATRIX_TYPE_DEFAULT``, which resolves to Voronoi for triangle meshes;
+    this wrapper passes Voronoi explicitly rather than relying on that.
+    Verified on both.
+
+    Notes
+    -----
+    Contrary to a long-standing comment in this repo, neither this nor
+    :func:`cotmatrix` returns all zeros on igl 2.5.1. Measured on 2.5.1 and 2.6.1
+    across planar, closed, non-manifold, zero-area and int32/float32 inputs: the
+    Voronoi diagonal sums to exactly the surface area, and ``cotmatrix`` matches
+    ``mesh.laplace.cotangent_weights`` up to sign. The hand-rolled
+    ``mesh.laplace`` implementations are kept because they are *not* drop-in
+    equivalents — ``fem_mass_matrix``'s diagonal sums to half this one's and
+    ``lumped_vertex_areas`` differs by ~0.1% (a different lumping scheme).
+    """
+    if _massmatrix is None:
+        _missing("massmatrix", "massmatrix")
+    if type is None:
+        type = MASSMATRIX_TYPE_VORONOI
+    return _massmatrix(_flt(v), _idx(f), type)
 
 
 def intrinsic_delaunay_cotmatrix(v: np.ndarray, f: np.ndarray):
@@ -1002,6 +1059,30 @@ def read_obj(obj_file) -> Tuple[np.ndarray, ...]:
         np.atleast_2d(_idx(ftc)),
         np.atleast_2d(_idx(fn)),
     )
+
+
+def read_triangle_mesh(filename) -> Tuple[np.ndarray, np.ndarray]:
+    """Read a triangle mesh, picking the format from the extension (obj/off/ply/stl/…).
+
+    Contract: ``(V, F)`` — ``(nV, 3)`` float64 and ``(nF, 3)`` int64, both
+    C-contiguous, **always 2-D**. Use this rather than
+    :func:`bg3dtools.mesh.mesh_io.read_triangle_mesh` when you want libigl's own
+    parser; the latter is a trimesh-based reader that also handles scenes and
+    point clouds.
+
+    2.6: same name, arity, order and dtypes. Two differences, both normalized
+    here: 2.5.1 squeezes ``F`` to ``(3,)`` when the file holds a single triangle
+    (2.6.1 returns ``(1, 3)``), and 2.5.1 takes an extra ``dtypef`` argument that
+    2.6.1 dropped — this wrapper never passes it, so both read float64.
+    Verified on both.
+    """
+    if _read_triangle_mesh is None:
+        _missing("read_triangle_mesh", "read_triangle_mesh")
+    out = _read_triangle_mesh(str(filename))
+    if not isinstance(out, tuple) or len(out) != 2:
+        _unexpected("read_triangle_mesh", out)
+    v, f = out
+    return _flt2d(v, 3), _idx2d(f, 3)
 
 
 def write_triangle_mesh(filename, v: np.ndarray, f: np.ndarray) -> bool:

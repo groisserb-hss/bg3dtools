@@ -70,7 +70,8 @@ def nonrigid_ICP(
     # convert to torch tensors
     templateV = torch.tensor(modelV, dtype=torch.float32, device=device)
     # laplacian matrix used to enforce smoothness
-    # (igl.cotmatrix is broken in igl 2.5.1, returns all zeros)
+    # Negated: cotangent_weights uses the opposite sign convention, so this equals
+    # igl_compat.cotmatrix (to 1e-15).
     L = sparse_to_tensor(-cotangent_weights(modelV, faces), device, dtype=torch.float32).to_sparse_csr()
     # sparse mapping from faces to vertices
     F2V = sparse_to_tensor(face_2_vertex_map(modelV, faces), device, dtype=torch.float32).to_sparse_csr()

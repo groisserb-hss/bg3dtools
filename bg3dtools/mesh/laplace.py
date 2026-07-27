@@ -387,7 +387,10 @@ def biharmonic_embedding(
         Biharmonic embedding coordinates.
     """
 
-    # Use custom implementations (igl.cotmatrix/massmatrix are broken in 2.5.1)
+    # Custom implementations rather than igl's: cotangent_weights needs negating
+    # (opposite sign convention) and fem_mass_matrix uses a different normalisation
+    # from igl.massmatrix -- its diagonal sums to half igl's Voronoi one. The old
+    # claim that igl's versions return all zeros on 2.5.1 is not reproducible.
     L = -cotangent_weights(verts, faces)  # negate: custom has opposite sign convention
     M = fem_mass_matrix(verts, faces)
 

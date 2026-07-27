@@ -171,6 +171,12 @@ removed `extract_manifold_patches`, `collapse_small_triangles`,
 `resolve_duplicated_faces` and `point_simplex_squared_distance`; 2.5.1 lacks
 `is_vertex_manifold`. `spectral_match/` goes through the layer too.
 
+Note there are now two `read_triangle_mesh` functions: `igl_compat.read_triangle_mesh`
+is libigl's own parser (V/F only), while `mesh.mesh_io.read_triangle_mesh` is the
+trimesh-based reader that also handles scenes and point clouds. Both return int64
+faces. `igl_compat.massmatrix` takes a `MASSMATRIX_TYPE_*` constant re-exported from
+the same module and defaults to Voronoi.
+
 Where a module wraps an igl function under the *same* name (`mesh.laplace.gaussian_curvature`,
 `mesh.utils.per_vertex_normals`, …), import the compat function as `igl_<name>` — an
 unaliased import binds a name the module's own `def` overwrites, so the wrapper ends up
@@ -206,5 +212,5 @@ Tests use these conventions:
 - **Cross-backend testing**: Verify numpy and PyTorch produce equivalent results
 - **Test mesh fixtures**: `_icosahedron()`, `_subdivided_icosahedron()`, `_unit_tetrahedron()`
 - **Cross-version testing**: `tests/test_igl_compat.py` must pass on igl 2.5.1 *and* 2.6.1 — keep it import-light (numpy/scipy only) so it runs in a bare scratch env. See the libigl Version Compatibility section.
-- **Note**: igl.cotmatrix and igl.massmatrix are broken in igl 2.5.1; custom implementations in `mesh/laplace.py` are used instead
+- **Note**: `mesh/laplace.py`'s `cotangent_weights` / `fem_mass_matrix` are used instead of `igl.cotmatrix` / `igl.massmatrix`, but *not* because igl's are broken — the long-standing "they return all zeros on 2.5.1" claim is **not reproducible** on 2.5.1 or 2.6.1 (measured across planar, closed, non-manifold, zero-area and int32/float32 inputs; `igl.cotmatrix` rows sum to ~0 and `igl.massmatrix(VORONOI)`'s diagonal sums to exactly the surface area). Keep the custom ones anyway: they are not drop-in equivalents — `cotangent_weights` has the **opposite sign** (negating it reproduces `igl.cotmatrix` to 1e-15), `fem_mass_matrix`'s diagonal sums to **half** igl's, and `lumped_vertex_areas` differs ~0.1% (different lumping). Pinned by `tests/test_igl_compat.py::test_cotmatrix_and_massmatrix_are_not_all_zeros`.
 - **Note**: libigl requires every *array* integer argument of a call (faces `f` + index arrays like `exact_geodesic`'s `vs`/`vt`) to share one integer dtype, else it raises `ValueError: Invalid type (int64 ...) ... Expected it to match argument 'f'`. NumPy's default int is int64 on Linux/macOS but int32 on Windows, so this only bites on some hosts. `igl_compat` now removes this hazard structurally by pinning every array index argument to int64 on the way in. Two repo-level helpers remain for the non-igl consumers: mesh readers in `mesh/mesh_io.py` canonicalize faces to **int64**, and `mesh/utils.as_igl_faces` / `match_index_dtype(f, *arrays)` keep hand-built face arrays canonical. Guarded by `tests/test_igl_index_dtype.py`. (Scalar index args, e.g. `point_simplex_squared_distance`'s face index, are exempt.)

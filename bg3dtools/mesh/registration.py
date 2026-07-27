@@ -173,7 +173,9 @@ def nonrigid_ICP(
     face_normals = per_face_normals(modelV, faces)
 
     # Cotangent Laplacian on the undeformed model (fixed throughout).
-    # (igl.cotmatrix is broken in igl 2.5.1, returns all zeros)
+    # Negated: cotangent_weights uses the opposite sign convention, so this equals
+    # igl_compat.cotmatrix (to 1e-15). An older comment claimed igl's version returns
+    # all zeros on 2.5.1; not reproducible -- see igl_compat.massmatrix's Notes.
     model_cot_L = csr_matrix(-cotangent_weights(modelV, faces))
 
     # Implicit smoothing for edge targets: (I - t*L) @ smooth = disp.
