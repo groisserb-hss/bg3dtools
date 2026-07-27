@@ -28,6 +28,9 @@ from bg3dtools.transforms_unified import (
     extract_params,
     rel_params_to_aff,
     aff_to_rel_params,
+    average_quaternions,
+    average_rotations,
+    quat_geodesic_distance,
 )
 ATOL = 1e-10
 
@@ -1053,3 +1056,204 @@ class TestKinematicChainTorch:
                                        err_msg=f"aff_to_rel_params twist mismatch at seed={seed}")
             np.testing.assert_allclose(tr_rec_t.numpy(), tr_rec_np, atol=1e-10,
                                        err_msg=f"aff_to_rel_params trans mismatch at seed={seed}")
+
+
+# ===================================================================
+# Rotation averaging tests (average_quaternions / average_rotations /
+# quat_geodesic_distance)
+# ===================================================================
+
+
+class TestRotationAveraging:
+
+    def test_average_of_identical_is_identity(self):
+        q = np.array([0.1, 0.2, 0.3, 0.9])
+        q = q / np.linalg.norm(q)
+        quats = np.tile(q, (10, 1))
+        avg = average_quaternions(quats)
+        # canonical w>=0; compare up to sign
+        np.testing.assert_allclose(_canonicalize_quat(avg), _canonicalize_quat(q), atol=1e-9)
+
+    def test_double_cover_ignored(self):
+        """q and -q are the same rotation; averaging must not cancel them."""
+        q = np.array([0.1, 0.2, 0.3, 0.9])
+        q = q / np.linalg.norm(q)
+        quats = np.stack([q, -q, q, -q])
+        avg = average_quaternions(quats)
+        np.testing.assert_allclose(_canonicalize_quat(avg), _canonicalize_quat(q), atol=1e-9)
+
+    def test_average_matches_scipy_mean(self):
+        rng = np.random.default_rng(1)
+        rotvecs = 0.05 * rng.standard_normal((200, 3)) + np.array([0.3, -0.2, 0.5])
+        sr = ScipyR.from_rotvec(rotvecs)
+        quats = sr.as_quat()  # scipy is scalar-last [x,y,z,w] too
+        avg = average_quaternions(quats)
+        ref = sr.mean().as_quat()
+        np.testing.assert_allclose(_canonicalize_quat(avg), _canonicalize_quat(ref), atol=1e-6)
+
+    def test_weights_bias_toward_heavier(self):
+        qa = ScipyR.from_rotvec([0.0, 0.0, 0.0]).as_quat()
+        qb = ScipyR.from_rotvec([0.0, 0.0, 1.0]).as_quat()
+        quats = np.stack([qa, qb])
+        near_a = average_quaternions(quats, weights=np.array([1000.0, 1.0]))
+        ang_to_a = quat_geodesic_distance(near_a, qa)
+        ang_to_b = quat_geodesic_distance(near_a, qb)
+        assert ang_to_a < ang_to_b
+        assert ang_to_a < 1e-2
+
+    def test_geodesic_distance_known(self):
+        q0 = ScipyR.from_rotvec([0, 0, 0]).as_quat()
+        q90 = ScipyR.from_rotvec([0, 0, np.pi / 2]).as_quat()
+        d = quat_geodesic_distance(q0, q90)
+        np.testing.assert_allclose(d, np.pi / 2, atol=ATOL)
+
+    def test_geodesic_distance_double_cover(self):
+        q = ScipyR.from_rotvec([0.2, -0.3, 0.5]).as_quat()
+        np.testing.assert_allclose(quat_geodesic_distance(q, -q), 0.0, atol=ATOL)
+        np.testing.assert_allclose(quat_geodesic_distance(q, q), 0.0, atol=ATOL)
+
+    @pytest.mark.parametrize("angle", [1e-1, 1e-3, 1e-5, 1e-6, 1e-7, 1e-9])
+    def test_geodesic_distance_small_angle_precision(self, angle):
+        """Small angles are the regime this is used in, so they must stay exact.
+
+        The obvious ``2 * arccos(|dot|)`` loses about half the mantissa here (4e-5
+        relative error at 1e-6 rad, 1% at 1e-7); the arctan2 form is exact. A
+        regression to arccos fails this at 1e-6 and below.
+        """
+        q0 = ScipyR.from_rotvec([0, 0, 0]).as_quat()
+        q1 = ScipyR.from_rotvec([0, 0, angle]).as_quat()
+        d = quat_geodesic_distance(q0, q1)
+        np.testing.assert_allclose(d, angle, rtol=1e-12)
+
+    @pytest.mark.parametrize("angle", [np.pi / 2, np.pi, np.pi + 0.5,
+                                       2 * np.pi - 0.3, 2 * np.pi])
+    def test_geodesic_distance_folds_into_zero_pi(self, angle):
+        """A rotation by theta > pi is the same as one by 2*pi - theta."""
+        q0 = ScipyR.from_rotvec([0, 0, 0]).as_quat()
+        q1 = ScipyR.from_rotvec([0, 0, angle]).as_quat()
+        expected = angle if angle <= np.pi else 2 * np.pi - angle
+        np.testing.assert_allclose(quat_geodesic_distance(q0, q1), expected, atol=1e-9)
+
+    @pytest.mark.parametrize("scale", [1e-8, 1e-5, 1e-2, 1.0, 3.0])
+    def test_geodesic_distance_matches_scipy_magnitude(self, scale):
+        rng = np.random.default_rng(11)
+        a = ScipyR.from_rotvec(rng.standard_normal((100, 3)))
+        b = ScipyR.from_rotvec(a.as_rotvec() + scale * rng.standard_normal((100, 3)))
+        ref = (a.inv() * b).magnitude()
+        got = quat_geodesic_distance(a.as_quat(), b.as_quat())
+        np.testing.assert_allclose(got, ref, atol=1e-14)
+
+    def test_geodesic_distance_broadcasts(self):
+        rng = np.random.default_rng(12)
+        qs = ScipyR.from_rotvec(0.4 * rng.standard_normal((6, 3))).as_quat()
+        qt = ScipyR.from_rotvec(0.4 * rng.standard_normal((6, 3))).as_quat()
+        assert quat_geodesic_distance(qs[:1], qt).shape == (6,)          # broadcast
+        assert quat_geodesic_distance(qs.reshape(2, 3, 4),
+                                      qt.reshape(2, 3, 4)).shape == (2, 3)
+
+    def test_average_rotations_matches_scipy(self):
+        rng = np.random.default_rng(3)
+        rotvecs = 0.1 * rng.standard_normal((50, 3)) + np.array([-0.4, 0.1, 0.2])
+        sr = ScipyR.from_rotvec(rotvecs)
+        Rmean = average_rotations(sr.as_matrix())
+        ref = sr.mean().as_matrix()
+        np.testing.assert_allclose(Rmean, ref, atol=1e-6)
+
+    def test_batched_averaging(self):
+        rng = np.random.default_rng(4)
+        # (B=3, N=20, 4)
+        quats = np.stack([
+            ScipyR.from_rotvec(0.1 * rng.standard_normal((20, 3))).as_quat()
+            for _ in range(3)
+        ])
+        avg = average_quaternions(quats)
+        assert avg.shape == (3, 4)
+        for b in range(3):
+            ref = ScipyR.from_quat(quats[b]).mean().as_quat()
+            np.testing.assert_allclose(_canonicalize_quat(avg[b]), _canonicalize_quat(ref), atol=1e-6)
+
+    def test_single_quaternion_average(self):
+        q = ScipyR.from_rotvec([0.3, 0.1, -0.2]).as_quat()
+        avg = average_quaternions(q[None, :])
+        np.testing.assert_allclose(_canonicalize_quat(avg), _canonicalize_quat(q), atol=1e-9)
+
+    def test_batched_weights(self):
+        """A (..., N) weights array must apply per batch element."""
+        rng = np.random.default_rng(5)
+        quats = np.stack([
+            ScipyR.from_rotvec(0.1 * rng.standard_normal((6, 3))).as_quat()
+            for _ in range(4)
+        ])
+        w = rng.random((4, 6))
+        avg = average_quaternions(quats, weights=w)
+        assert avg.shape == (4, 4)
+        for b in range(4):
+            np.testing.assert_allclose(avg[b], average_quaternions(quats[b], weights=w[b]),
+                                       atol=ATOL)
+
+    def test_float32_dtype_preserved(self):
+        q = ScipyR.from_rotvec([0.3, 0.1, -0.2]).as_quat().astype(np.float32)
+        assert average_quaternions(np.tile(q, (3, 1))).dtype == np.float32
+
+
+class TestRotationAveragingTorch:
+    """numpy/torch parity for the rotation-averaging helpers."""
+
+    @staticmethod
+    def _quats(seed, n=30, spread=0.2):
+        rng = np.random.default_rng(seed)
+        return ScipyR.from_rotvec(spread * rng.standard_normal((n, 3))).as_quat()
+
+    def test_average_quaternions_parity(self):
+        torch = pytest.importorskip("torch")
+        q = self._quats(600)
+        out = average_quaternions(torch.from_numpy(q))
+        assert isinstance(out, torch.Tensor)
+        np.testing.assert_allclose(out.numpy(), average_quaternions(q), atol=ATOL)
+
+    def test_average_quaternions_weighted_parity(self):
+        torch = pytest.importorskip("torch")
+        q = self._quats(601)
+        w = np.random.default_rng(601).random(len(q))
+        out = average_quaternions(torch.from_numpy(q), weights=torch.from_numpy(w))
+        np.testing.assert_allclose(out.numpy(), average_quaternions(q, weights=w), atol=ATOL)
+
+    def test_average_quaternions_batched_parity(self):
+        torch = pytest.importorskip("torch")
+        q = np.stack([self._quats(602 + i, n=8) for i in range(3)])
+        out = average_quaternions(torch.from_numpy(q))
+        assert tuple(out.shape) == (3, 4)
+        np.testing.assert_allclose(out.numpy(), average_quaternions(q), atol=ATOL)
+
+    def test_average_rotations_parity(self):
+        torch = pytest.importorskip("torch")
+        R = ScipyR.from_quat(self._quats(603)).as_matrix()
+        out = average_rotations(torch.from_numpy(R))
+        assert isinstance(out, torch.Tensor)
+        np.testing.assert_allclose(out.numpy(), average_rotations(R), atol=ATOL)
+
+    def test_geodesic_distance_parity(self):
+        torch = pytest.importorskip("torch")
+        q1, q2 = self._quats(604), self._quats(605, spread=0.9)
+        out = quat_geodesic_distance(torch.from_numpy(q1), torch.from_numpy(q2))
+        assert isinstance(out, torch.Tensor)
+        np.testing.assert_allclose(out.numpy(), quat_geodesic_distance(q1, q2), atol=ATOL)
+
+    @pytest.mark.parametrize("angle", [1e-1, 1e-5, 1e-7])
+    def test_geodesic_distance_small_angle_parity(self, angle):
+        torch = pytest.importorskip("torch")
+        q0 = torch.from_numpy(ScipyR.from_rotvec([0, 0, 0]).as_quat())
+        q1 = torch.from_numpy(ScipyR.from_rotvec([0, 0, angle]).as_quat())
+        np.testing.assert_allclose(quat_geodesic_distance(q0, q1).numpy(), angle, rtol=1e-12)
+
+    def test_identity_average_parity(self):
+        torch = pytest.importorskip("torch")
+        q = torch.tensor([[0.0, 0.0, 0.0, 1.0]] * 5, dtype=torch.float64)
+        np.testing.assert_allclose(average_quaternions(q).numpy(), [0, 0, 0, 1], atol=ATOL)
+
+    def test_double_cover_parity(self):
+        torch = pytest.importorskip("torch")
+        q = ScipyR.from_rotvec([0.1, 0.2, 0.3]).as_quat()
+        quats = torch.from_numpy(np.stack([q, -q, q, -q]))
+        avg = average_quaternions(quats).numpy()
+        np.testing.assert_allclose(_canonicalize_quat(avg), _canonicalize_quat(q), atol=1e-9)

@@ -33,6 +33,7 @@ __all__ = [
     "rigid_reg",
     "affine_reg",
     "spherical_to_cartesian", "cartesian_to_spherical",
+    "average_quaternions", "average_rotations", "quat_geodesic_distance",
 ]
 
 
@@ -1040,3 +1041,155 @@ def cartesian_to_spherical(vec: ArrayLike, bk=None) -> ArrayLike:
     if squeeze:
         out = out.ravel()
     return out
+
+
+def average_quaternions(
+    quats: ArrayLike,
+    weights: "Optional[ArrayLike]" = None,
+    bk=None,
+) -> ArrayLike:
+    """
+    Average a set of quaternions on SO(3) (Markley's eigenvector method).
+
+    Computes the rotation that minimises the sum of (weighted) squared chordal
+    distances to the input rotations.  Correctly handles quaternion double-cover
+    (q and -q are the same rotation), unlike a naive component-wise mean.
+
+    Reference: Markley, Cheng, Crassidis, Oshman, "Averaging Quaternions",
+    Journal of Guidance, Control, and Dynamics 30(4), 2007 — the average is the
+    eigenvector of the largest eigenvalue of ``M = sum_i w_i q_i q_i^T``.
+
+    Parameters
+    ----------
+    quats : (..., N, 4) array
+        N quaternions to average, in [x, y, z, w] (scalar-last) format, over
+        arbitrary leading batch dimensions.  Need not be pre-normalised.
+    weights : (..., N) array, optional
+        Per-quaternion weights.  None -> uniform.  Normalised internally.
+    bk : optional
+        Backend (numpy or TorchBackend). Inferred from *quats* if None.
+
+    Returns
+    -------
+    quat : (..., 4) array
+        The average quaternion, normalised and canonical (w >= 0).
+    """
+    if bk is None:
+        bk = infer_backend(quats)
+
+    orig_shape = quats.shape
+    assert orig_shape[-1] == 4, f"quats must have shape [..., N, 4], got {orig_shape}"
+    N = orig_shape[-2]
+
+    # Flatten leading batch dims -> (B, N, 4)
+    q = bk.reshape(quats, (-1, N, 4))
+    B = q.shape[0]
+
+    # Normalise each quaternion (zero-length -> identity to avoid NaNs)
+    qn = bk.linalg.norm(q, axis=-1, keepdims=True)
+    q = q / bk.clip(qn, EPS, None)
+
+    if weights is None:
+        w = bk.ones((B, N), like=q) if bk is not np else np.ones((B, N), dtype=q.dtype)
+    else:
+        w = bk.reshape(weights, (B, N))
+    w = w / bk.clip(bk.sum(w, axis=-1, keepdims=True), EPS, None)
+
+    # M = sum_i w_i q_i q_i^T  -> (B, 4, 4)
+    M = bk.einsum("bn,bni,bnj->bij", w, q, q)
+
+    # Largest-eigenvalue eigenvector (eigh returns ascending order)
+    _, evecs = bk.linalg.eigh(M)
+    avg = evecs[..., -1]  # (B, 4)
+
+    # Canonicalise sign (w >= 0) and normalise
+    sign = bk.sign(avg[:, 3:4])
+    if bk is np:
+        sign = np.where(sign == 0, 1.0, sign)
+    else:
+        import torch
+        sign = torch.where(sign == 0, torch.ones_like(sign), sign)
+    avg = avg * sign
+    avg = avg / bk.clip(bk.linalg.norm(avg, axis=-1, keepdims=True), EPS, None)
+
+    return bk.reshape(avg, orig_shape[:-2] + (4,))
+
+
+def average_rotations(
+    R: ArrayLike,
+    weights: "Optional[ArrayLike]" = None,
+    bk=None,
+) -> ArrayLike:
+    """
+    Average a set of rotation matrices on SO(3).
+
+    Thin wrapper over :func:`average_quaternions`: converts to quaternions,
+    averages, converts back.
+
+    Parameters
+    ----------
+    R : (..., N, 3, 3) array
+        N rotation matrices to average, over arbitrary leading batch dims.
+    weights : (..., N) array, optional
+        Per-rotation weights.  None -> uniform.
+    bk : optional
+        Backend. Inferred from *R* if None.
+
+    Returns
+    -------
+    R_mean : (..., 3, 3) array
+        The average rotation matrix.
+    """
+    if bk is None:
+        bk = infer_backend(R)
+    quats = R_to_quat(R, bk=bk)  # (..., N, 4)
+    return quat_to_R(average_quaternions(quats, weights=weights, bk=bk), bk=bk)
+
+
+def quat_geodesic_distance(q1: ArrayLike, q2: ArrayLike, bk=None) -> ArrayLike:
+    """
+    Geodesic (angular) distance between rotations, from quaternions.
+
+    Returns the rotation angle of the relative rotation ``q1^{-1} q2`` in
+    radians, in [0, pi].
+
+    Computed as ``2 * arctan2(|vec(r)|, |w(r)|)`` on the relative quaternion
+    ``r = q1^{-1} q2``, rather than the shorter ``2 * arccos(|<q1, q2>|)``:
+    ``arccos`` is ill-conditioned near ``dot = 1``, which is precisely the
+    regime this function is used in (convergence checks, residual rotations).
+    The ``arccos`` form loses about half the mantissa below ~1e-5 rad -- 4e-5
+    relative error at 1e-6 rad, 1% at 1e-7 rad -- while ``arctan2`` stays exact
+    because it reads the small quantity (the vector part) directly instead of
+    inferring it from ``1 - cos``. Taking ``|w(r)|`` folds the result into
+    [0, pi], which is what handles the quaternion double-cover (q and -q, and
+    equivalently a rotation by theta vs 2*pi - theta).
+
+    Parameters
+    ----------
+    q1, q2 : (..., 4) array
+        Quaternions in [x, y, z, w] (scalar-last) format; broadcast together.
+        Need not be pre-normalised.
+    bk : optional
+        Backend. Inferred from *q1* if None.
+
+    Returns
+    -------
+    angle : (...) array
+        Angular distance in radians, in [0, pi].
+    """
+    if bk is None:
+        bk = infer_backend(q1)
+    q1 = q1 / bk.clip(bk.linalg.norm(q1, axis=-1, keepdims=True), EPS, None)
+    q2 = q2 / bk.clip(bk.linalg.norm(q2, axis=-1, keepdims=True), EPS, None)
+
+    x1, y1, z1, w1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+    x2, y2, z2, w2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+
+    # r = q1^{-1} q2 = conj(q1) q2 (both unit): scalar part is <q1, q2> and the
+    # vector part is w1*v2 - w2*v1 - v1 x v2.
+    rw = w1 * w2 + x1 * x2 + y1 * y2 + z1 * z2
+    rx = w1 * x2 - w2 * x1 - (y1 * z2 - z1 * y2)
+    ry = w1 * y2 - w2 * y1 - (z1 * x2 - x1 * z2)
+    rz = w1 * z2 - w2 * z1 - (x1 * y2 - y1 * x2)
+
+    return 2.0 * bk.arctan2(bk.sqrt(rx * rx + ry * ry + rz * rz), bk.abs(rw))
