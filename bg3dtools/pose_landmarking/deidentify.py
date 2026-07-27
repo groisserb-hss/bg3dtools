@@ -19,6 +19,7 @@ from mediapipe.tasks.python.core.base_options import BaseOptions
 
 from ..image_tools import normalized_to_pixel_coordinates
 from .resource_paths import face_weights
+from ._delegate import create_detector
 
 # Keep MediaPipe logging quieter (but do not swallow real errors).
 os.environ.setdefault("GLOG_minloglevel", "2")
@@ -53,22 +54,28 @@ def create_tasks_face_detector(
     model_asset_path: Optional[str] = None,
     min_detection_confidence: float = 0.9,
     video: bool = True,
+    use_gpu: Optional[bool] = None,
 ) -> mp_vision.FaceDetector:
     """Create a MediaPipe *Tasks* FaceDetector.
 
     `model_asset_path` must point to a face detector `.tflite` model compatible with the Tasks API.
+    `use_gpu`: None -> CPU unless MEDIAPIPE_USE_GPU is set; True/False -> force.
+    GPU is opt-in; it falls back to CPU if the GPU delegate cannot be created.
     """
     if model_asset_path is None:
         model_asset_path = face_weights
 
     running_mode = mp.tasks.vision.RunningMode.VIDEO if video else mp.tasks.vision.RunningMode.IMAGE
 
-    options = mp_vision.FaceDetectorOptions(
-        base_options=BaseOptions(model_asset_path=model_asset_path),
-        min_detection_confidence=min_detection_confidence,
-        running_mode=running_mode,
-    )
-    return mp_vision.FaceDetector.create_from_options(options)
+    def _build(delegate):
+        options = mp_vision.FaceDetectorOptions(
+            base_options=BaseOptions(model_asset_path=model_asset_path, delegate=delegate),
+            min_detection_confidence=min_detection_confidence,
+            running_mode=running_mode,
+        )
+        return mp_vision.FaceDetector.create_from_options(options)
+
+    return create_detector(_build, use_gpu=use_gpu, what="FaceDetector")
 
 
 def _clamp_bbox(x0: int, y0: int, x1: int, y1: int, w: int, h: int) -> Tuple[int, int, int, int]:
