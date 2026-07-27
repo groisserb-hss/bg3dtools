@@ -128,12 +128,12 @@ def smooth_keypoints(
 
 
 def get_mediapipe_detector(video: bool = True, model_asset_path: Optional[str] = None,
-                           use_gpu=None):
+                           use_gpu: Optional[bool] = None):
     """Create a MediaPipe PoseLandmarker using the modern Tasks API.
 
-    use_gpu: None -> decide from MEDIAPIPE_DISABLE_GPU env (default GPU when
-    available); True/False -> force. Falls back to CPU if the GPU (OpenGL)
-    delegate cannot be created on this platform.
+    use_gpu: None -> CPU unless MEDIAPIPE_USE_GPU is set; True/False -> force.
+    GPU is opt-in; it falls back to CPU if the GPU (GL) delegate cannot be
+    created on this platform.
     """
     running_mode = mp_vision.RunningMode.VIDEO if video else mp_vision.RunningMode.IMAGE
 
@@ -159,7 +159,7 @@ def landmark_video(video_generator,
                    deidentify: bool = False,
                    segment: bool = False,
                    target_frames: Optional[int] = None,
-                   use_gpu=None) -> 'LandmarkVideoResult':
+                   use_gpu: Optional[bool] = None) -> 'LandmarkVideoResult':
     """
     Process a video and extract BlazePose landmarks.
 
@@ -170,10 +170,10 @@ def landmark_video(video_generator,
         deidentify: Blur faces in output video.
         segment: Generate body segmentation masks.
         target_frames: Number of frames to process (None = all).
-        use_gpu: MediaPipe delegate selection. None -> decide from the
-            MEDIAPIPE_DISABLE_GPU env var (default: GPU when available);
-            True/False -> force. Falls back to CPU if the GPU (OpenGL)
-            delegate is unavailable on this platform.
+        use_gpu: MediaPipe delegate selection. None -> CPU unless the
+            MEDIAPIPE_USE_GPU env var is set; True/False -> force. GPU is
+            opt-in, and falls back to CPU if the GPU (GL) delegate is
+            unavailable on this platform.
 
     Returns:
         LandmarkVideoResult with blaze_2d, blaze_3d, and optionally

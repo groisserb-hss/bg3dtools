@@ -54,13 +54,13 @@ def create_tasks_face_detector(
     model_asset_path: Optional[str] = None,
     min_detection_confidence: float = 0.9,
     video: bool = True,
-    use_gpu=None,
+    use_gpu: Optional[bool] = None,
 ) -> mp_vision.FaceDetector:
     """Create a MediaPipe *Tasks* FaceDetector.
 
     `model_asset_path` must point to a face detector `.tflite` model compatible with the Tasks API.
-    `use_gpu`: None -> decide from MEDIAPIPE_DISABLE_GPU env; True/False -> force
-    (falls back to CPU if the GPU delegate is unavailable).
+    `use_gpu`: None -> CPU unless MEDIAPIPE_USE_GPU is set; True/False -> force.
+    GPU is opt-in; it falls back to CPU if the GPU delegate cannot be created.
     """
     if model_asset_path is None:
         model_asset_path = face_weights

@@ -5,17 +5,19 @@ This module provides wrappers for MediaPipe's image segmentation for
 isolating human subjects from backgrounds in video frames.
 """
 
+from typing import Optional
+
 import mediapipe as mp
 from .resource_paths import segmenter_weights
 from ..utils import SuppressCppStderr
 from ._delegate import create_detector
 
 
-def create_mp_segmenter(model_path: str = segmenter_weights, use_gpu=None):
+def create_mp_segmenter(model_path: str = segmenter_weights, use_gpu: Optional[bool] = None):
     """Create a MediaPipe ImageSegmenter.
 
-    `use_gpu`: None -> decide from MEDIAPIPE_DISABLE_GPU env; True/False -> force
-    (falls back to CPU if the GPU delegate is unavailable).
+    `use_gpu`: None -> CPU unless MEDIAPIPE_USE_GPU is set; True/False -> force.
+    GPU is opt-in; it falls back to CPU if the GPU delegate cannot be created.
     """
     BaseOptions = mp.tasks.BaseOptions
     ImageSegmenter = mp.tasks.vision.ImageSegmenter
