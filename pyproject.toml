@@ -10,7 +10,7 @@ description = "Scientific computing toolkit for 3D geometry processing, computer
 readme = "README.md"
 license = "BSD-3-Clause"
 license-files = ["LICENSE"]
-authors = [{name = "Benjamin Groisser", email = "bgroisser@gmail.com"}]
+authors = [{name = "Benjamin Groisser", email = "bgroisser+hss@gmail.com"}]
 requires-python = ">=3.9"
 dependencies = [
     "numpy",
