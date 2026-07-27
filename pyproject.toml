@@ -1,11 +1,16 @@
 [build-system]
-requires = ["setuptools>=64", "setuptools-scm"]
+# setuptools>=77 for PEP 639 (SPDX `license` string + `license-files`).
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "bg3dtools"
-version = "0.1.0"
-description = "Scientific computing toolkit for 3D geometry processing, computer vision, and parametric human body modeling"
+version = "1.0.2"
+description = "Scientific computing toolkit for 3D geometry processing, computer vision, and human pose landmarking"
+readme = "README.md"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{name = "Benjamin Groisser", email = "bgroisser@gmail.com"}]
 requires-python = ">=3.9"
 dependencies = [
     "numpy",
@@ -36,8 +41,14 @@ all = [
 [tool.setuptools.packages.find]
 include = ["bg3dtools*", "spectral_match*"]
 
+[project.urls]
+Homepage = "https://github.com/groisserb-hss/bg3dtools"
+
 [tool.setuptools.package-data]
-bg3dtools = ["**/*.npy", "pose_landmarking/resources/*"]
+# Scoped deliberately: a bare "**/*.npy" swept up 9.2 MB of unreferenced debug
+# dumps in mesh/ and shipped them in every wheel. smpl_2_blaze.npy (loaded by
+# pose_landmarking.joint_mapper) is the only .npy the package actually needs.
+bg3dtools = ["pose_landmarking/*.npy", "pose_landmarking/resources/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

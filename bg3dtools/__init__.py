@@ -19,10 +19,15 @@ pose_landmarking
     Human pose detection and landmarking.
 iphone
     iPhone depth/RGB data I/O utilities.
-articulated_models
-    Parametric body models (SMPL, STAR).
-coregistration
-    Mesh coregistration and alignment.
+
+Modules
+-------
+graphs
+    Graph algorithms over mesh connectivity (requires the ``graph`` extra).
+igl_compat
+    libigl version-compatibility wrappers; the only module that imports ``igl``.
+transforms_unified
+    Rotation and affine transforms (twist/quaternion/matrix), numpy or torch.
 
 Examples
 --------
@@ -31,4 +36,4 @@ Examples
 >>> from bg3dtools.utils import Timer
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.2"

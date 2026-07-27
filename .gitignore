@@ -27,6 +27,11 @@ var/
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Tool caches. Each of these writes a self-ignoring .gitignore inside itself, so
+# they stay out of `git status` anyway -- but only until something clears it.
+.pytest_cache/
+.joblib_cache/
+
 # OS / editor junk
 .DS_Store
 *.swp

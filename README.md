@@ -1,6 +1,6 @@
 # bg3dtools
 
-Python toolkit for 3D geometry processing, mesh registration, point cloud reconstruction, pose landmarking, and parametric body models (SMPL/STAR).
+Python toolkit for 3D geometry processing, mesh registration, point cloud reconstruction, and human pose landmarking.
 
 ## Install
 
@@ -19,7 +19,8 @@ The base install pulls in only `numpy`, `scipy`, `libigl`, `Pillow`, and `imagei
 | `viz`    | open3d, matplotlib          | Visualization wrappers in `render/`              |
 | `graph`  | igraph                      | `bg3dtools.graphs`                               |
 | `io`     | tenacity                    | `utils.cifs_wrappers` retry logic                |
-| `all`    | everything above            | One-shot install                                 |
+| `match`  | jax[cpu]>=0.4.18,<0.5       | `spectral_match` functional-map solver           |
+| `all`    | all of the above            | One-shot install                                 |
 
 ```bash
 pip install -e '.[mesh,viz]'      # pick what you need
@@ -55,7 +56,8 @@ conda create -y -n igl261 -c conda-forge python=3.12 igl=2.6.1 numpy scipy pytes
 | `igl_compat.py` | libigl version-compatibility wrappers (the only module importing `igl`) |
 | `render/` | Visualization via trimesh, Open3D, matplotlib |
 | `utils/` | Timing, FPS, PCA, filesystem, stats |
-| `transforms_unified.py` | Rotation/affine transforms (twist/quaternion/matrix) |
+| `graphs.py` | Graph algorithms over mesh connectivity (needs the `graph` extra) |
+| `transforms_unified.py` | Rotation/affine transforms (twist/quaternion/matrix), incl. SO(3) averaging |
 
 A separate `spectral_match/` package (in the same repo) provides dense mesh correspondence via functional maps.
 

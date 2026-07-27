@@ -4,15 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-**bg3dtools** is a scientific computing toolkit for 3D geometry processing, computer vision, and parametric human body modeling. The primary codebase is in `bg3dtools/`. A companion package `spectral_match/` provides spectral mesh correspondence via functional maps.
+**bg3dtools** is a scientific computing toolkit for 3D geometry processing, computer vision, and human pose landmarking. The primary codebase is in `bg3dtools/`. A companion package `spectral_match/` provides spectral mesh correspondence via functional maps.
 
 Key domains:
 - Triangle mesh processing and registration
 - Point cloud analysis and reconstruction
 - Human pose detection and landmarking (MediaPipe-based)
-- Parametric body models (SMPL, STAR)
 - PyTorch-based neural network utilities
 - Spectral mesh matching and correspondence
+
+Note: there is **no** parametric body model implementation here (no SMPL/STAR
+forward model or shape space). What exists is interop with SMPL's joint
+convention — `pose_landmarking.joint_mapper` loads a SMPL→BlazePose regressor
+matrix. Earlier versions of this file and the README claimed otherwise.
 
 ## Commands
 
@@ -29,6 +33,44 @@ pytest tests/ -v
 pytest tests/test_transforms_unified.py -v        # specific file
 pytest tests/test_transforms_unified.py::TestClass::test_method -v  # specific test
 ```
+
+## Releasing
+
+There is **no CI** — no `.github/` directory, no workflows. Releases are manual.
+
+The version lives in **two** hardcoded places that must be bumped together:
+
+| File | Line |
+|------|------|
+| `pyproject.toml` | `version = "..."` |
+| `bg3dtools/__init__.py` | `__version__ = "..."` |
+
+They drifted badly once: both sat at `0.1.0` from the initial commit through the
+1.0.0 and 1.0.1 tags, because the tags were the only thing anyone bumped. If you
+change one, change the other. (`build-system` briefly required `setuptools-scm`
+without a `[tool.setuptools_scm]` table, so it never derived anything; that
+requirement was dropped in 1.0.2.)
+
+**Tag convention.** Tags are named `spinescrews-X.Y.Z`, and the annotation reads
+"bg3dtools revision spinescrews X.Y.Z is built against". They mark which
+bg3dtools commit the downstream **spinescrews** project pins — they are not
+independent bg3dtools release numbers, though as of 1.0.2 the package version is
+kept in step with them. Tag only after the release commit is merged to `main`,
+since the tag must point at the merged commit:
+
+```bash
+git checkout main && git pull
+git tag -a spinescrews-X.Y.Z -m "bg3dtools revision spinescrews X.Y.Z is built against"
+git push origin spinescrews-X.Y.Z
+```
+
+Note a GitHub *tag* is not a GitHub *Release*: pushing the tag does not create a
+Release object, so the Releases page can lag behind the tag list.
+
+**Before tagging**: run the full suite on igl 2.5.1 *and* `test_igl_compat.py` on
+2.6.1 (see the libigl section below), then check the built artifact —
+`python -m build` and confirm the wheel carries `pose_landmarking/` data but no
+stray `.npy` debug dumps. `package-data` is scoped narrowly for that reason.
 
 ## Architecture
 
@@ -75,6 +117,7 @@ make_aff(twist, trans)  # [..., 3], [..., 3] -> [..., 4, 4]
 - `viz`    — open3d, matplotlib
 - `graph`  — igraph (only needed by `bg3dtools.graphs`)
 - `io`     — tenacity (only needed by `utils.cifs_wrappers`)
+- `match`  — jax[cpu]>=0.4.18,<0.5 (only needed by `spectral_match`'s functional-map solver)
 - `all`    — bundles all of the above
 
 Install with: `pip install 'bg3dtools[all]'` or pick the extras you need.
