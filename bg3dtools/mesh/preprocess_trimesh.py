@@ -11,11 +11,11 @@ from argparse import ArgumentParser
 from glob import glob
 import sys
 
-import igl
 import trimesh
 import numpy as np
 from scipy.stats import mode
 
+from bg3dtools.igl_compat import remove_duplicate_vertices
 from bg3dtools.mesh.preprocess import MeshCleaner, clean_scans
 from bg3dtools.mesh.utils import extract_manifold_patches
 
@@ -64,7 +64,7 @@ class MeshCleanerTrimesh(MeshCleaner):
         # before looking for loose patches. Face count/order is preserved by
         # remove_duplicate_vertices, so patch labels map directly to original faces.
         v, f = self.numpy_geometry()
-        sv, svi, svj, sf = igl.remove_duplicate_vertices(v, f, 0.000001)
+        sv, svi, svj, sf = remove_duplicate_vertices(v, f, 0.000001)
         p = extract_manifold_patches(sf)[1]
         f_mask = p == mode(p, keepdims=False)[0]
         self.submesh(f_mask)

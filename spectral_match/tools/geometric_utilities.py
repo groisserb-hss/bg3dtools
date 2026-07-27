@@ -8,13 +8,17 @@ Procrustes alignment, boundary extraction, and sampling utilities.
 # Derived from pyFM by Robin Magnet (MIT License) — see /THIRD_PARTY_NOTICES.txt
 import math
 
-import igl
 import numpy as np
 from joblib import Memory, Parallel, delayed
 from scipy.spatial.distance import cdist
 
+from bg3dtools.igl_compat import (
+    barycentric_coordinates_tri,
+    doublearea,
+    exact_geodesic,
+    point_mesh_squared_distance,
+)
 from bg3dtools.mesh.laplace import biharmonic_embedding
-from bg3dtools.mesh.utils import match_index_dtype
 
 # To have a cache for computations which are taking time to complete
 memory = Memory(location=".joblib_cache", verbose=0)
@@ -182,11 +186,9 @@ def geodesic_matrix(
     if i2.size == 0:
         i2 = i1
 
-    # libigl requires the source/target index arrays to share f's integer dtype
-    # (else it raises on hosts where NumPy's default int differs from f's, e.g.
-    # int32 faces vs int64 indices on Windows). Harmonize both to f.dtype.
-    i2 = match_index_dtype(f, i2)
-    func = lambda i: igl.exact_geodesic(v, f, match_index_dtype(f, np.array([i])), i2)
+    # igl_compat.exact_geodesic pins faces and both index sets to int64, so the
+    # dtype mismatch libigl rejects array arguments over cannot arise here.
+    func = lambda i: exact_geodesic(v, f, np.array([i]), i2)
     d = Parallel(n_jobs=-1)(delayed(func)(j) for j in i1)
     return np.stack(d)
 
@@ -224,7 +226,7 @@ def area(v: np.ndarray, f: np.ndarray) -> np.floating:
 
 def face_areas(v: np.ndarray, f: np.ndarray) -> np.ndarray:
     """Per-face areas of a triangle mesh."""
-    return igl.doublearea(v, f) / 2
+    return doublearea(v, f) / 2
 
 
 def face_normals(v: np.ndarray, f: np.ndarray) -> np.ndarray:
@@ -254,11 +256,11 @@ def propogate_points(
     """Transfer points from *src* to *dst* mesh preserving barycentric + normal offset."""
     n_src = face_normals(src, f)
     n_dst = face_normals(dst, f)
-    _, i, q = igl.point_mesh_squared_distance(points, src, f)
+    _, i, q = point_mesh_squared_distance(points, src, f)
     l = np.linalg.norm((points - q) * n_src[i], axis=-1, keepdims=True)
     j = f[i]
     u, v, w = np.asarray(src[j.T], order="C", dtype=q.dtype)
-    bc = igl.barycentric_coordinates_tri(q, u, v, w)
+    bc = barycentric_coordinates_tri(q, u, v, w)
     bc[np.isnan(bc).any(axis=-1)] = 1 / 3
     pts = np.sum(bc[..., np.newaxis] * dst[j], axis=1)
     pts += l * n_dst[i]
@@ -269,7 +271,7 @@ def extrapolate_geodesic_matrix(
     src: np.ndarray, dst: np.ndarray, g: np.ndarray, f: np.ndarray
 ) -> np.ndarray:
     """Approximate geodesic distances on *dst* from those computed on *src*."""
-    _, i, q = igl.point_mesh_squared_distance(dst, src, f)
+    _, i, q = point_mesh_squared_distance(dst, src, f)
     j = f[i]
     l = np.linalg.norm(src[j] - np.expand_dims(q, 1), axis=-1)
     h = (g[j] + np.expand_dims(l, -1)).min(axis=1)
@@ -284,10 +286,10 @@ def extrapolate_scalars(
     """Interpolate per-vertex *scalars* from *src* mesh onto *dst* points."""
     if len(scalars.shape) == 1:
         scalars = scalars[..., np.newaxis]
-    _, i, q = igl.point_mesh_squared_distance(dst, src, f)
+    _, i, q = point_mesh_squared_distance(dst, src, f)
     j = f[i]
     u, v, w = np.asarray(src[j.T], order="C", dtype=np.double)
-    bc = igl.barycentric_coordinates_tri(q, u, v, w)
+    bc = barycentric_coordinates_tri(q, u, v, w)
     return np.sum(bc[..., np.newaxis] * scalars[j], axis=1)
 
 

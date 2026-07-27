@@ -5,10 +5,24 @@ This module provides utilities for manipulating triangle meshes including
 submesh extraction, normal computation, smoothing, and surface sampling.
 """
 
-import igl
 import numpy as np
 from typing import Tuple, Optional, Union, List
 from scipy.sparse import coo_matrix, csr_matrix
+from bg3dtools.igl_compat import (
+    AVAILABLE as IGL_AVAILABLE,
+    PER_VERTEX_NORMALS_WEIGHTING_TYPE_AREA,
+    adjacency_matrix,
+    doublearea,
+    facet_components,
+    internal_angles,
+    random_points_on_mesh,
+    remove_unreferenced,
+    vertex_triangle_adjacency,
+    edges as igl_edges,
+    extract_manifold_patches as igl_extract_manifold_patches,
+    per_face_normals as igl_per_face_normals,
+    per_vertex_normals as igl_per_vertex_normals,
+)
 from bg3dtools.utils.np_helpers import row_normalize
 from bg3dtools.pointclouds.quantize import sparse_quantize
 
@@ -65,17 +79,21 @@ def match_index_dtype(faces: np.ndarray, *arrays: np.ndarray):
 def as_igl_faces(faces: np.ndarray) -> np.ndarray:
     """Canonicalize a face array to C-contiguous int64 for libigl.
 
-    The class-2 companion to :func:`match_index_dtype`. Several libigl functions
-    *return* faces in a platform-dependent integer dtype -- notably the Windows wheel's
-    ``remove_unreferenced`` / ``collapse_small_triangles`` / ``decimate`` / ``upsample`` /
-    ``bfs_orient`` hand back int32 regardless of input dtype -- and feeding int32 faces to
-    predicates like ``is_edge_manifold`` / ``all_boundary_loop`` / ``is_vertex_manifold``
-    makes them report spurious non-manifoldness. Route faces coming out of (or into) such
-    calls through here so every libigl boundary sees one dtype regardless of platform or
-    provenance.
+    The class-2 companion to :func:`match_index_dtype`. The libigl bindings propagate
+    the input face dtype to their outputs -- ``remove_unreferenced`` /
+    ``collapse_small_triangles`` / ``decimate`` / ``upsample`` / ``bfs_orient`` hand back
+    int32 when handed int32 -- and feeding int32 faces to predicates like
+    ``is_edge_manifold`` / ``all_boundary_loop`` makes them report spurious
+    non-manifoldness. Since NumPy's default integer is int32 on Windows, that only ever
+    bit on some hosts.
+
+    :mod:`bg3dtools.igl_compat` now pins int64 on **both** sides of every libigl call, so
+    the igl boundary is covered there. This helper remains the chokepoint for keeping the
+    *repo-wide* face dtype canonical -- faces that reach non-igl consumers (indexing,
+    trimesh, PLY writers) or that were built by hand.
 
     Unlike ``match_index_dtype`` (which coerces to *faces' own* dtype, possibly int32),
-    this always forces int64 -- the dtype these predicates behave correctly on.
+    this always forces int64 -- the dtype the rest of the repo assumes.
     """
     return np.ascontiguousarray(faces, dtype=np.int64)
 
@@ -101,15 +119,14 @@ def extract_manifold_patches(
     f_labels : (nF,) ndarray
         Patch label for each face.
     """
-    if hasattr(igl, 'extract_manifold_patches'):
-        n_patches, f_labels = igl.extract_manifold_patches(faces)
-    elif hasattr(igl, 'facet_components'):
-        n_patches, f_labels = igl.facet_components(faces)
-    elif hasattr(igl, 'connected_components'):
-        f_labels = igl.connected_components(faces)
-        n_patches = int(f_labels.max()) + 1
+    if 'extract_manifold_patches' in IGL_AVAILABLE:
+        n_patches, f_labels = igl_extract_manifold_patches(faces)
     else:
-        raise RuntimeError('unable to extract manifold patches')
+        # igl 2.6 removed extract_manifold_patches. facet_components is the
+        # nearest equivalent, but it joins across the non-manifold edges that
+        # extract_manifold_patches splits at, so patches come out coarser.
+        f_labels = facet_components(faces)
+        n_patches = int(f_labels.max()) + 1 if f_labels.size else 0
 
     return n_patches, f_labels
 
@@ -194,10 +211,10 @@ def submesh(
     seder = np.argsort(sub_faces[:, 0])
     sub_faces = sub_faces[seder]
     f_idx = f_idx[seder]
-    new_verts, new_faces, _, v_idx = igl.remove_unreferenced(old_verts, sub_faces)
+    new_verts, new_faces, _, v_idx = remove_unreferenced(old_verts, sub_faces)
     new_verts = new_verts.reshape([-1, n])
-    # remove_unreferenced returns int32 faces on some libigl wheels (Windows) regardless of
-    # input dtype; pin int64 so every submesh consumer feeds int64 to downstream igl predicates.
+    # igl_compat.remove_unreferenced already returns int64; keep the pin so the dtype is
+    # guaranteed for consumers even if a caller monkeypatches or reshapes around it.
     new_faces = as_igl_faces(new_faces.reshape([-1, m]))
 
     if return_indices:
@@ -209,7 +226,7 @@ def submesh(
 def per_vertex_normals(
     verts: np.ndarray,
     faces: np.ndarray,
-    mode: int = igl.PER_VERTEX_NORMALS_WEIGHTING_TYPE_AREA
+    mode: int = PER_VERTEX_NORMALS_WEIGHTING_TYPE_AREA
 ) -> np.ndarray:
     """
     Compute per-vertex normals for a triangle mesh.
@@ -228,7 +245,7 @@ def per_vertex_normals(
     normals : (nV, 3) ndarray
         Unit normals at each vertex.
     """
-    pt_normals = igl.per_vertex_normals(verts, faces, mode)
+    pt_normals = igl_per_vertex_normals(verts, faces, mode)
     pt_normals[np.isnan(pt_normals)] = 0
     pt_normals = row_normalize(pt_normals)
     return pt_normals
@@ -254,7 +271,7 @@ def per_face_normals(
         Unit normal for each face.
     """
     n = np.array([0, 1, 0], dtype=verts.dtype)
-    face_normals = igl.per_face_normals(verts, faces, n).reshape([-1, 3])
+    face_normals = igl_per_face_normals(verts, faces, n).reshape([-1, 3])
     bad = np.any(np.isnan(face_normals), axis=1)
     face_normals[bad] = n
     face_normals = row_normalize(face_normals)
@@ -334,9 +351,9 @@ def per_vertex_smoothing(
 
     if A is None:
         F = np.ascontiguousarray(f, dtype=np.int64)
-        A = igl.adjacency_matrix(F)
+        A = adjacency_matrix(F)
         if np.max(A) == 0:
-            E = igl.edges(F)
+            E = igl_edges(F)
             A = adj_from_edges(E, np.max(F)+1)
 
         A = row_normalize_csr(A)
@@ -452,7 +469,7 @@ def face_2_vertex_map(
     nF = len(faces)
     nV = len(verts)
 
-    face_areas = igl.doublearea(verts, faces)
+    face_areas = doublearea(verts, faces)
 
     # Build sparse matrix directly: each face corner contributes to its vertex
     fidx = np.repeat(np.arange(nF), 3)  # face index for each corner
@@ -470,13 +487,13 @@ def face_2_vertex_map(
 
 def edge_triangle_adjacency(f: np.ndarray, nV: Optional[int] = None) -> List[np.ndarray]:
     """Return per-edge lists of adjacent triangle indices."""
-    edges = igl.edges(f)
+    edges = igl_edges(f)
     nE = edges.shape[0]
 
     if nV is None:
         nV = np.max(f) + 1
 
-    v2f, ni = igl.vertex_triangle_adjacency(f, nV)
+    v2f, ni = vertex_triangle_adjacency(f, nV)
     v2f_list = [v2f[ni[vv]:ni[vv + 1]] for vv in range(nV)]
 
     adjacency_list = [[]] * nE
@@ -509,10 +526,10 @@ def surface_sample(
     """
     from bg3dtools.mesh.barycentric import bc2sparse
 
-    n = int(1000 * np.sum(igl.doublearea(v, f)) * d) if N is None else N
+    n = int(1000 * np.sum(doublearea(v, f)) * d) if N is None else N
     res = 500 / np.linalg.norm(np.max(v, axis=0) - np.min(v, axis=0)) if res is None else res
 
-    bc_pt, fidx_pt = igl.random_points_on_mesh(n, v, f)[:2]  # backwards compatibility
+    bc_pt, fidx_pt = random_points_on_mesh(n, v, f)[:2]  # backwards compatibility
     good = fidx_pt < f.shape[0]
     bc_pt, fidx_pt = bc_pt[good], fidx_pt[good]
     point_map = bc2sparse(f, fidx_pt, bc_pt)
@@ -561,8 +578,8 @@ def ordered_edges(faces: np.ndarray) -> np.ndarray:
     edges : (nE, 2) ndarray
         Sorted edge list for consistency with MATLAB ordering.
     """
-    edges = igl.edges(as_igl_faces(faces))  # int64: match the repo-wide face dtype so the
-    idx = np.lexsort(edges[:, [1, 0]].T)    # returned edges never seed an int32/int64 mismatch
+    edges = igl_edges(faces)              # igl_compat returns int64 edges regardless of
+    idx = np.lexsort(edges[:, [1, 0]].T)  # the input dtype, so no mismatch can be seeded
     return edges[idx, :]
 
 
@@ -723,7 +740,7 @@ def sample_obj_vtex(
     img_flat = img.reshape(-1, C)
 
     # compute internal angles for triangles
-    angles = igl.internal_angles(verts, faces)
+    angles = internal_angles(verts, faces)
 
     # Vectorized: gather all texture coordinates per face corner
     tex_rc_per_face = texRC[ftex]  # (nF, 3, 2) — row/col for each corner

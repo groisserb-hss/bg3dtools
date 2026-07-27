@@ -6,10 +6,10 @@ in arbitrary dimensions using nearest-neighbor acceleration structures.
 """
 
 from typing import Tuple
-import igl
 import numpy as np
 from pykdtree.kdtree import KDTree
 
+from bg3dtools.igl_compat import edges as igl_edges, point_simplex_squared_distance, vertex_triangle_adjacency
 from bg3dtools.mesh.utils import as_igl_faces
 
 __all__ = [
@@ -40,16 +40,16 @@ class MeshProjector:
     """
 
     def __init__(self, v: np.ndarray, f: np.ndarray):
-        f = as_igl_faces(f)  # int64: vertex_triangle_adjacency/edges misbehave on int32 (Windows)
+        f = as_igl_faces(f)  # int64: canonical face dtype for the cached v2f/e2f indices
         self.v = v
         self.f = f
 
         self.vert_tree = KDTree(v)
-        v2f, ni = igl.vertex_triangle_adjacency(f, v.shape[0])
+        v2f, ni = vertex_triangle_adjacency(f, v.shape[0])
         v2f_list = [v2f[ni[vv]:ni[vv + 1]] for vv in range(v.shape[0])]
         self.v2f = v2f_list
 
-        edges = igl.edges(f)
+        edges = igl_edges(f)
         edge_centers = (v[edges[:, 0], :] + v[edges[:, 1], :]) / 2
         self.edge_tree = KDTree(edge_centers)
         e2f_list = [[]] * edges.shape[0]
@@ -111,7 +111,7 @@ class MeshProjector:
             # search space of potential nearest simplexes
             idx = np.unique(np.concatenate((v_faces, e_faces, f_faces)))
             for i in idx:
-                test_d2, test_c, test_bc = igl.point_simplex_squared_distance(point, self.v, self.f, i)
+                test_d2, test_c, test_bc = point_simplex_squared_distance(point, self.v, self.f, i)
 
                 if test_d2 < best_d2:
                     best_d2 = test_d2

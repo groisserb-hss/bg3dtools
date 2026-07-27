@@ -5,8 +5,12 @@ results as the custom implementations they replace.
 Each test runs *both* the old code (copied inline) and the proposed replacement,
 then asserts numerical equivalence within tolerance.
 
-Note: igl.cotmatrix and igl.massmatrix are broken in igl 2.5.1 (return all
-zeros), so cotangent_weights and fem_mass_matrix are kept as custom code.
+Note: cotangent_weights and fem_mass_matrix are kept as custom code because they
+differ from igl's -- the former by sign convention (negating it reproduces
+igl.cotmatrix to 1e-15), the latter by normalisation (its diagonal sums to half
+igl.massmatrix's Voronoi one). An earlier note here said igl's versions return all
+zeros on 2.5.1; that is not reproducible on 2.5.1 or 2.6.1 -- see the Notes on
+bg3dtools.igl_compat.massmatrix.
 """
 
 import numpy as np

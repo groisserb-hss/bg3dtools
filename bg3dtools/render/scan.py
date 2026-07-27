@@ -4,7 +4,14 @@ Geometry specs are plain data objects describing *what* to draw. ``render_scan()
 ``render_frame()`` returns a single image; both share ONE backend core (``_render_to_images``), which
 tries these tiers in order and returns the first that works:
 
- 1. OffscreenRenderer (headless EGL/Filament) — Linux servers / Modal.
+ 1. OffscreenRenderer (headless EGL/Filament) — Linux servers / Modal. EGL init can CRASH natively
+    (SIGSEGV, uncatchable) on hosts without a usable GPU/EGL stack, so this tier is guarded by a
+    one-time subprocess crash probe (``_offscreen_crash_probe_ok``): a throwaway child constructs the
+    renderer first, and only if it survives do we render in-process. If the plain probe dies on Linux
+    the probe retries with ``EGL_PLATFORM=surfaceless`` (Mesa's software EGL, the open3d ≥ 0.19 way to
+    render headless without a GPU) and adopts it on success. Verdicts are cached on disk per
+    host/env/open3d-version so the probe cost is paid once per host, not once per process; set
+    ``BG3DTOOLS_RENDER_PROBE=force`` to re-probe or ``=never`` to skip probing (pre-probe behavior).
  2. legacy Visualizer — macOS (visible window) and interactive Linux/Windows.
  3. matplotlib Agg (CPU only, no GPU or display) — universal last-resort fallback. Crude and
     diagnostic-only, but always available; runs when both Open3D backends are dead (e.g. headless
@@ -25,9 +32,13 @@ costs nothing and does not hard-require the extra.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import sys
 from dataclasses import dataclass, field
+from importlib import metadata as _importlib_metadata
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -158,8 +169,8 @@ class RenderOptions:
 
 def _wireframe_edges(faces: np.ndarray) -> np.ndarray:
     """Extract unique edges from a face array.  Returns (E, 2) int64."""
-    import igl
-    return igl.edges(faces.astype(np.int64))
+    from bg3dtools.igl_compat import edges
+    return edges(faces)
 
 
 def _height_colormap(pts: np.ndarray, vertical_axis: int = 1) -> np.ndarray:
@@ -463,15 +474,14 @@ def _exec_legacy(frames, camera: CameraParams, options: RenderOptions) -> List[n
     (else convert_from_pinhole is silently ignored → blank); the intrinsic is built from the ACTUAL
     framebuffer size (Retina-safe), then the explicit camera is re-applied every frame."""
     import open3d as o3d
-    import os
     style = options.style
 
     # The legacy Visualizer needs a real GL context (a window) even when created invisibly, so it
     # can't run on a headless host. On some builds create_window HARD-ABORTS there (native crash,
     # uncatchable) instead of returning False -- taking the whole process down before the dispatcher
     # can fall through to matplotlib. Fail *catchably* in the cases we can detect, so _render_to_images
-    # moves on to the matplotlib tier; the uncatchable-abort case is why callers isolate the first
-    # probe render in a subprocess (e.g. spinescrews.figures.probe_render_backends).
+    # moves on to the matplotlib tier. (The offscreen tier has the same uncatchable-crash problem in
+    # EGL init; that one is covered by the built-in subprocess probe, _offscreen_crash_probe_ok.)
     if sys.platform.startswith('linux') and not (os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY')):
         raise RuntimeError('legacy Visualizer unavailable: no X11/Wayland display (DISPLAY/WAYLAND_DISPLAY unset)')
 
@@ -805,6 +815,130 @@ def _exec_matplotlib(frames, camera: CameraParams, options: RenderOptions) -> Li
     return images
 
 
+# ---------------------------------------------------------------------------
+# Offscreen crash probe: EGL init can SIGSEGV/abort natively (uncatchable) on
+# hosts without a usable GPU/EGL stack. No try/except can save the process, so
+# before the FIRST in-process OffscreenRenderer we construct one in a throwaway
+# spawned child; if the child dies, the tier is disabled and the dispatcher
+# falls through catchably. On Linux a failed plain probe is retried with
+# EGL_PLATFORM=surfaceless (Mesa's software EGL — how open3d >= 0.19 renders
+# headless without a GPU) and the variable is adopted process-wide on success.
+# Host verdicts are cached on disk so the probe cost (a couple of open3d
+# imports in child processes) is paid once per host/env/open3d-version, not
+# once per process — batch pipelines spawn one process per work item.
+# ---------------------------------------------------------------------------
+
+def _offscreen_probe_worker():
+    """Construct + exercise an OffscreenRenderer. Runs ONLY inside a run_isolated
+    child: a native crash here (EGL init SIGSEGV/abort) kills the child, whose
+    exit code becomes the probe verdict, instead of killing the real process."""
+    import open3d.visualization.rendering as rendering
+    renderer = rendering.OffscreenRenderer(16, 16)
+    renderer.render_to_image()
+
+
+def _probe_cache_path() -> Path:
+    cache_root = os.environ.get('XDG_CACHE_HOME') or (Path.home() / '.cache')
+    return Path(cache_root) / 'bg3dtools' / 'render_probe.json'
+
+
+def _probe_cache_key(o3d_version: str) -> str:
+    display = bool(os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'))
+    return (f"{sys.platform}|display={int(display)}"
+            f"|egl={os.environ.get('EGL_PLATFORM', '')}|open3d={o3d_version}")
+
+
+def _cached_verdict(key: str) -> Optional[str]:
+    try:
+        verdict = json.loads(_probe_cache_path().read_text()).get(key)
+    except (OSError, ValueError):
+        return None
+    return verdict if verdict in ('ok', 'ok-surfaceless', 'dead') else None
+
+
+def _write_verdict(key: str, verdict: str) -> None:
+    path = _probe_cache_path()
+    try:
+        try:
+            cache = json.loads(path.read_text())
+        except (OSError, ValueError):
+            cache = {}
+        cache[key] = verdict
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f'.{os.getpid()}.tmp')     # concurrent workers: atomic replace, no torn reads
+        tmp.write_text(json.dumps(cache, indent=2, sort_keys=True))
+        tmp.replace(path)
+    except OSError as exc:
+        log.debug('render probe cache not writable (%s); will re-probe next process', exc)
+
+
+def _probe_host(key: str) -> str:
+    """Run the crash probe(s) for this host and cache the verdict.
+
+    Returns 'ok' (offscreen safe as-is), 'ok-surfaceless' (safe once
+    EGL_PLATFORM=surfaceless is set — already applied here), or 'dead'.
+    """
+    from bg3dtools.render import run_isolated
+    if run_isolated(_offscreen_probe_worker):
+        _write_verdict(key, 'ok')
+        return 'ok'
+    if not sys.platform.startswith('linux') or os.environ.get('EGL_PLATFORM'):
+        # surfaceless is a Mesa/Linux mechanism; and an explicitly pinned
+        # EGL_PLATFORM is the user's call — don't second-guess it.
+        _write_verdict(key, 'dead')
+        return 'dead'
+    if 'open3d' in sys.modules:
+        # A surfaceless retry can't help THIS process (the variable must precede
+        # open3d's import) and probing it now would poison the cache for clean
+        # processes — leave the host verdict to a future process.
+        return 'dead'
+    os.environ['EGL_PLATFORM'] = 'surfaceless'
+    if run_isolated(_offscreen_probe_worker):
+        _write_verdict(key, 'ok-surfaceless')
+        return 'ok-surfaceless'
+    del os.environ['EGL_PLATFORM']
+    _write_verdict(key, 'dead')
+    return 'dead'
+
+
+_offscreen_probe_ok: Optional[bool] = None     # per-process memo of the probe outcome
+
+
+def _offscreen_crash_probe_ok() -> bool:
+    """True when OffscreenRenderer is safe to construct in THIS process."""
+    global _offscreen_probe_ok
+    if _offscreen_probe_ok is not None:
+        return _offscreen_probe_ok
+    mode = os.environ.get('BG3DTOOLS_RENDER_PROBE', '').lower()
+    if mode == 'never':                        # opt out: pre-probe behavior, caller accepts crash risk
+        _offscreen_probe_ok = True
+        return True
+    try:
+        o3d_version = _importlib_metadata.version('open3d')
+    except _importlib_metadata.PackageNotFoundError:
+        _offscreen_probe_ok = True             # no open3d → the backend fails with a catchable ImportError
+        return True
+
+    key = _probe_cache_key(o3d_version)
+    verdict = _cached_verdict(key) if mode != 'force' else None
+    if verdict is None:
+        log.info('probing offscreen render backend in a subprocess (once per host; '
+                 'cached in %s)', _probe_cache_path())
+        verdict = _probe_host(key)
+
+    if verdict == 'ok-surfaceless':
+        if 'open3d' in sys.modules and os.environ.get('EGL_PLATFORM') != 'surfaceless':
+            log.warning('offscreen rendering on this host needs EGL_PLATFORM=surfaceless set before '
+                        'open3d is imported; open3d is already imported, so the offscreen tier is '
+                        'disabled for this process')
+            _offscreen_probe_ok = False
+            return False
+        os.environ.setdefault('EGL_PLATFORM', 'surfaceless')
+        verdict = 'ok'
+    _offscreen_probe_ok = verdict == 'ok'
+    return _offscreen_probe_ok
+
+
 # Backends that have already failed in this process. Open3D's offscreen/legacy
 # engines print a native (C++) error to stderr *before* raising when a
 # GPU/EGL/display context can't be created (e.g. "EGL Headless is not supported"
@@ -827,12 +961,21 @@ def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> L
 
     A backend that fails once is recorded in ``_dead_backends`` and skipped for the rest of the
     process, so a dead Open3D backend prints its native error — and this function logs its fallback
-    warning — at most once per process rather than on every frame."""
+    warning — at most once per process rather than on every frame.
+
+    The offscreen tier additionally passes a one-time subprocess crash probe before its FIRST
+    in-process use (``_offscreen_crash_probe_ok``): EGL init can crash natively (uncatchable) on
+    hosts without a working GPU/EGL stack, and only a throwaway child process can absorb that."""
     backends = [_exec_legacy] if sys.platform == 'darwin' else [_exec_offscreen, _exec_legacy]
     backends = backends + [_exec_matplotlib]
     errors = []
     for backend in backends:
         if backend.__name__ in _dead_backends:                           # known-dead this process → skip silently, no re-probe
+            continue
+        if backend is _exec_offscreen and not _offscreen_crash_probe_ok():
+            errors.append('_exec_offscreen: failed the subprocess crash probe (native EGL/driver '
+                          'crash on this host)')
+            _dead_backends.add(backend.__name__)                         # skip silently from now on
             continue
         try:
             images = backend(frames, camera, options)

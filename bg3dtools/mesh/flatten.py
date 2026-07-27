@@ -383,14 +383,14 @@ def lscm_flatten(
     ValueError
         If LSCM fails (e.g. degenerate mesh or no boundary).
     """
-    import igl
+    from bg3dtools.igl_compat import boundary_loop, lscm
 
     verts = np.asarray(verts, dtype=np.float64)
-    faces = np.asarray(faces, dtype=np.int32)
+    faces = np.asarray(faces, dtype=np.int64)
     up_direction = np.asarray(up_direction, dtype=np.float64)
 
     # 1. Get boundary loop
-    boundary = igl.boundary_loop(faces)
+    boundary = boundary_loop(faces)
     if len(boundary) < 2:
         raise ValueError("Mesh has no boundary; LSCM requires a boundary loop.")
 
@@ -411,11 +411,11 @@ def lscm_flatten(
     if pin_near == pin_up:
         pin_up = boundary[np.argmax(dists_to_center)]
 
-    b = np.array([pin_near, pin_up], dtype=np.int32)
+    b = np.array([pin_near, pin_up], dtype=np.int64)
     bc = np.array([[0.0, 0.0], [0.0, 1.0]], dtype=np.float64)
 
     # 3. Solve LSCM
-    success, uv = igl.lscm(verts, faces, b, bc)
+    success, uv = lscm(verts, faces, b, bc)
     if not success:
         raise ValueError("LSCM solve failed on this submesh.")
 

@@ -4,15 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-**bg3dtools** is a scientific computing toolkit for 3D geometry processing, computer vision, and parametric human body modeling. The primary codebase is in `bg3dtools/`. A companion package `spectral_match/` provides spectral mesh correspondence via functional maps.
+**bg3dtools** is a scientific computing toolkit for 3D geometry processing, computer vision, and human pose landmarking. The primary codebase is in `bg3dtools/`. A companion package `spectral_match/` provides spectral mesh correspondence via functional maps.
 
 Key domains:
 - Triangle mesh processing and registration
 - Point cloud analysis and reconstruction
 - Human pose detection and landmarking (MediaPipe-based)
-- Parametric body models (SMPL, STAR)
 - PyTorch-based neural network utilities
 - Spectral mesh matching and correspondence
+
+Note: there is **no** parametric body model implementation here (no SMPL/STAR
+forward model or shape space). What exists is interop with SMPL's joint
+convention — `pose_landmarking.joint_mapper` loads a SMPL→BlazePose regressor
+matrix. Earlier versions of this file and the README claimed otherwise.
 
 ## Commands
 
@@ -29,6 +33,44 @@ pytest tests/ -v
 pytest tests/test_transforms_unified.py -v        # specific file
 pytest tests/test_transforms_unified.py::TestClass::test_method -v  # specific test
 ```
+
+## Releasing
+
+There is **no CI** — no `.github/` directory, no workflows. Releases are manual.
+
+The version lives in **two** hardcoded places that must be bumped together:
+
+| File | Line |
+|------|------|
+| `pyproject.toml` | `version = "..."` |
+| `bg3dtools/__init__.py` | `__version__ = "..."` |
+
+They drifted badly once: both sat at `0.1.0` from the initial commit through the
+1.0.0 and 1.0.1 tags, because the tags were the only thing anyone bumped. If you
+change one, change the other. (`build-system` briefly required `setuptools-scm`
+without a `[tool.setuptools_scm]` table, so it never derived anything; that
+requirement was dropped in 1.0.2.)
+
+**Tag convention.** Tags are named `spinescrews-X.Y.Z`, and the annotation reads
+"bg3dtools revision spinescrews X.Y.Z is built against". They mark which
+bg3dtools commit the downstream **spinescrews** project pins — they are not
+independent bg3dtools release numbers, though as of 1.0.2 the package version is
+kept in step with them. Tag only after the release commit is merged to `main`,
+since the tag must point at the merged commit:
+
+```bash
+git checkout main && git pull
+git tag -a spinescrews-X.Y.Z -m "bg3dtools revision spinescrews X.Y.Z is built against"
+git push origin spinescrews-X.Y.Z
+```
+
+Note a GitHub *tag* is not a GitHub *Release*: pushing the tag does not create a
+Release object, so the Releases page can lag behind the tag list.
+
+**Before tagging**: run the full suite on igl 2.5.1 *and* `test_igl_compat.py` on
+2.6.1 (see the libigl section below), then check the built artifact —
+`python -m build` and confirm the wheel carries `pose_landmarking/` data but no
+stray `.npy` debug dumps. `package-data` is scoped narrowly for that reason.
 
 ## Architecture
 
@@ -75,6 +117,7 @@ make_aff(twist, trans)  # [..., 3], [..., 3] -> [..., 4, 4]
 - `viz`    — open3d, matplotlib
 - `graph`  — igraph (only needed by `bg3dtools.graphs`)
 - `io`     — tenacity (only needed by `utils.cifs_wrappers`)
+- `match`  — jax[cpu]>=0.4.18,<0.5 (only needed by `spectral_match`'s functional-map solver)
 - `all`    — bundles all of the above
 
 Install with: `pip install 'bg3dtools[all]'` or pick the extras you need.
@@ -111,6 +154,7 @@ from bg3dtools.pytorch import TorchBackend, infer_backend  # if torch installed
 | `utils/` | Timing, algorithms (FPS, PCA), filesystem, stats |
 | `utils/cifs_wrappers/` | Network filesystem I/O with exponential backoff retry |
 | `transforms_unified.py` | Rotation/affine transforms (twist/quaternion/matrix) |
+| `igl_compat.py` | libigl version-compatibility wrappers — the only module that imports `igl` |
 
 ### spectral_match package
 
@@ -118,6 +162,68 @@ Separate package (included in setuptools config) for dense mesh correspondence u
 - `spectral_match/pipeline.py` - `FunctionalMapper` orchestrates eigendecomposition → descriptors → functional map solving → product manifold filtering
 - Uses bg3dtools mesh utilities for Laplacian computation and I/O
 - Configured via `SigConfig` and `MatchConfig` namedtuples
+
+## libigl Version Compatibility — `igl_compat`
+
+**igl 2.5.1 is canonical** (conda-forge; `environment.yml` pins it). igl 2.6 is a full
+rewrite of the python bindings (pybind11 → nanobind) with breaking changes to names,
+return arity, return order and dtypes. A machine that drifted to 2.6.1 took down a
+downstream pipeline, so all libigl access is now funnelled through one module.
+
+**`bg3dtools/igl_compat.py` is the only place in the package that does `import igl`.**
+Every wrapper presents the 2.5.1 contract regardless of which binding is installed, and
+each one documents its 2.6 behavior. Never call `igl.*` directly — add a wrapper instead.
+
+```python
+from bg3dtools.igl_compat import facet_components, doublearea, AVAILABLE
+
+labels = facet_components(faces)     # bare (nF,) int64 array, never a tuple
+if 'is_vertex_manifold' in AVAILABLE:   # use this, not hasattr(igl, ...)
+    ...
+```
+
+Beyond per-function fixes the layer guarantees repo-wide: **int64 C-contiguous index
+arrays, float64 C-contiguous coordinate arrays**, and a preserved leading dimension even
+when it is 1 (the 2.5.1 binding squeezes those). The int64 pinning applies to *inputs*
+too, which makes the index-dtype mismatch noted under Testing Patterns structurally
+impossible through the layer. **Never feature-detect by version string** —
+`igl.__version__` does not exist in the 2.6.1 conda build.
+
+The nastiest 2.6 change is `exact_geodesic`: the positional signature went from
+`(v, f, vs, vt)` to `(V, F, VS, FS, VT, FT)`, so a 4-positional call binds target
+*vertices* to the source *faces* slot and returns an **empty array instead of raising**.
+The wrapper always calls by keyword.
+
+One wrapper deliberately **changes** 2.5.1's numbers rather than preserving them:
+`igl.point_simplex_squared_distance` misreads the vertex matrix as column-major, so fed a
+normal C-contiguous `V` it returns "closest points" that are not on the mesh. The wrapper
+passes `asfortranarray(v)`, checked against an independent point-triangle reference over
+1387 point/face pairs. This fixes `mesh.highD.MeshProjector`, whose nearest-point search
+was off by up to 1.9 in squared distance.
+
+`tests/test_igl_compat.py` pins every contract and is import-light on purpose, so it runs
+in a bare scratch env. To check a candidate igl version:
+
+```bash
+conda create -y -n igl261 -c conda-forge python=3.12 igl=2.6.1 numpy scipy pytest
+~/opt/anaconda3/envs/igl261/bin/python -m pytest tests/test_igl_compat.py -v
+```
+
+Functions absent from one binding are skipped there and flagged in `AVAILABLE`: 2.6
+removed `extract_manifold_patches`, `collapse_small_triangles`,
+`resolve_duplicated_faces` and `point_simplex_squared_distance`; 2.5.1 lacks
+`is_vertex_manifold`. `spectral_match/` goes through the layer too.
+
+Note there are now two `read_triangle_mesh` functions: `igl_compat.read_triangle_mesh`
+is libigl's own parser (V/F only), while `mesh.mesh_io.read_triangle_mesh` is the
+trimesh-based reader that also handles scenes and point clouds. Both return int64
+faces. `igl_compat.massmatrix` takes a `MASSMATRIX_TYPE_*` constant re-exported from
+the same module and defaults to Voronoi.
+
+Where a module wraps an igl function under the *same* name (`mesh.laplace.gaussian_curvature`,
+`mesh.utils.per_vertex_normals`, …), import the compat function as `igl_<name>` — an
+unaliased import binds a name the module's own `def` overwrites, so the wrapper ends up
+calling itself. A test enforces this across both packages.
 
 ## macOS Open3D Rendering Caveat
 
@@ -148,5 +254,6 @@ Tests use these conventions:
 - **Known-answer tests**: Apply known transform, recover parameters, assert roundtrip
 - **Cross-backend testing**: Verify numpy and PyTorch produce equivalent results
 - **Test mesh fixtures**: `_icosahedron()`, `_subdivided_icosahedron()`, `_unit_tetrahedron()`
-- **Note**: igl.cotmatrix and igl.massmatrix are broken in igl 2.5.1; custom implementations in `mesh/laplace.py` are used instead
-- **Note**: libigl requires every *array* integer argument of a call (faces `f` + index arrays like `exact_geodesic`'s `vs`/`vt`) to share one integer dtype, else it raises `ValueError: Invalid type (int64 ...) ... Expected it to match argument 'f'`. NumPy's default int is int64 on Linux/macOS but int32 on Windows, so this only bites on some hosts. Defenses: mesh readers in `mesh/mesh_io.py` canonicalize faces to **int64**, and multi-index call sites route their index arrays through `mesh/utils.match_index_dtype(f, *arrays)`. Guarded by `tests/test_igl_index_dtype.py`. (Scalar index args, e.g. `point_simplex_squared_distance`'s face index, are exempt.)
+- **Cross-version testing**: `tests/test_igl_compat.py` must pass on igl 2.5.1 *and* 2.6.1 — keep it import-light (numpy/scipy only) so it runs in a bare scratch env. See the libigl Version Compatibility section.
+- **Note**: `mesh/laplace.py`'s `cotangent_weights` / `fem_mass_matrix` are used instead of `igl.cotmatrix` / `igl.massmatrix`, but *not* because igl's are broken — the long-standing "they return all zeros on 2.5.1" claim is **not reproducible** on 2.5.1 or 2.6.1 (measured across planar, closed, non-manifold, zero-area and int32/float32 inputs; `igl.cotmatrix` rows sum to ~0 and `igl.massmatrix(VORONOI)`'s diagonal sums to exactly the surface area). Keep the custom ones anyway: they are not drop-in equivalents — `cotangent_weights` has the **opposite sign** (negating it reproduces `igl.cotmatrix` to 1e-15), `fem_mass_matrix`'s diagonal sums to **half** igl's, and `lumped_vertex_areas` differs ~0.1% (different lumping). Pinned by `tests/test_igl_compat.py::test_cotmatrix_and_massmatrix_are_not_all_zeros`.
+- **Note**: libigl requires every *array* integer argument of a call (faces `f` + index arrays like `exact_geodesic`'s `vs`/`vt`) to share one integer dtype, else it raises `ValueError: Invalid type (int64 ...) ... Expected it to match argument 'f'`. NumPy's default int is int64 on Linux/macOS but int32 on Windows, so this only bites on some hosts. `igl_compat` now removes this hazard structurally by pinning every array index argument to int64 on the way in. Two repo-level helpers remain for the non-igl consumers: mesh readers in `mesh/mesh_io.py` canonicalize faces to **int64**, and `mesh/utils.as_igl_faces` / `match_index_dtype(f, *arrays)` keep hand-built face arrays canonical. Guarded by `tests/test_igl_index_dtype.py`. (Scalar index args, e.g. `point_simplex_squared_distance`'s face index, are exempt.)

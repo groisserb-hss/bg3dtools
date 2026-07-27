@@ -5,6 +5,11 @@ channels:
   - defaults
 dependencies:
   - python>=3.9
+  # igl 2.5.1 is the canonical libigl binding for this repo — igl 2.6 is a
+  # nanobind rewrite with breaking API changes (see bg3dtools/igl_compat.py).
+  # It comes from conda-forge rather than the pip block below because PyPI has
+  # no macOS-arm64 wheels for libigl at all.
+  - igl=2.5.1
   - pip
   - pip:
     - -e .[all]

@@ -5,9 +5,10 @@ This module provides functions for computing barycentric coordinates,
 converting them to sparse matrices, and projecting points onto mesh surfaces.
 """
 
-import igl
 import numpy as np
 from scipy.sparse import coo_matrix
+
+from bg3dtools.igl_compat import point_mesh_squared_distance
 
 __all__ = [
     "points_to_barycentric",
@@ -87,7 +88,7 @@ def project_to_bccoord(verts, faces, points, return_map=False):
     :return fidx: for each point, index of matching simplex
     """
     bad = np.logical_not(np.all(np.isfinite(points), axis=1))
-    d2, fidx, projected = igl.point_mesh_squared_distance(points, verts, faces)
+    d2, fidx, projected = point_mesh_squared_distance(points, verts, faces)
     fidx[bad] = 0
     tris = verts[faces[fidx, :], :]
     bc = points_to_barycentric(tris, projected)

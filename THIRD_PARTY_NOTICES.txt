@@ -1,7 +1,11 @@
-This project includes code derived from:
+This project includes code derived from the third-party works below.
+
+================================================================================
 
 pyFM — Python Functional Maps
 https://github.com/RobinMagnet/pyFM
+
+Used by: spectral_match/
 
 MIT License
 
@@ -24,3 +28,65 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+
+torchvision — reference detection training scripts
+https://github.com/pytorch/vision  (references/detection/)
+
+Used by: bg3dtools/pytorch/detection/ — coco_eval.py, coco_utils.py, engine.py,
+transforms.py, utils.py
+
+These files carry no upstream attribution header (their docstrings were
+rewritten), so the derivation is inferred rather than declared. It is however
+unambiguous: they reproduce torchvision's reference-script API verbatim --
+CocoEvaluator, create_common_coco_eval, MetricLogger, SmoothedValue,
+warmup_lr_scheduler, get_coco_api_from_dataset -- and coco_utils.py retains the
+upstream comment "annotation IDs need to start at 1, not 0, see torchvision
+issue #1530". torchvision is BSD 3-Clause, the same license as this project.
+
+BSD 3-Clause License
+
+Copyright (c) Soumith Chintala 2016,
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of the copyright holder nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+================================================================================
+
+HRNet (minimal implementation)
+
+Used by: bg3dtools/pytorch/hrnet.py
+
+*** LICENSE UNRESOLVED -- do not redistribute this file without checking. ***
+
+The module's own docstring credits "Original concise code: Shuchen Du" and
+describes itself as a comment-annotated re-printing that does "not touch a single
+executable line from the original submission". No license or source URL was
+recorded with it, and no upstream has been identified, so the terms under which
+it may be redistributed are unknown. Every other component here is BSD- or
+MIT-licensed; this one is the open question. Resolve the provenance, or drop the
+file, before treating the distribution as fully cleared.
