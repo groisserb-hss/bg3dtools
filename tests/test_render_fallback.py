@@ -59,12 +59,17 @@ def _background_fraction(img, thresh=250):
 
 
 @pytest.fixture(autouse=True)
-def _clear_dead_backends():
-    """The dispatcher memoizes failed backends process-wide; reset it between tests so
-    backend-monkeypatching tests don't leak dead-backend state into one another."""
+def _clear_dead_backends(monkeypatch):
+    """The dispatcher memoizes failed backends (and the offscreen crash-probe verdict)
+    process-wide; reset both between tests so backend-monkeypatching tests don't leak
+    state into one another. Probing is forced OFF by default so no test spawns a real
+    subprocess probe against the host's Open3D — the probe tests opt back in."""
     scan._dead_backends.clear()
+    scan._offscreen_probe_ok = None
+    monkeypatch.setenv("BG3DTOOLS_RENDER_PROBE", "never")
     yield
     scan._dead_backends.clear()
+    scan._offscreen_probe_ok = None
 
 
 # ---------------------------------------------------------------------------
@@ -219,3 +224,113 @@ def test_dead_backend_probed_once_then_skipped_silently(monkeypatch, caplog):
     assert calls["mpl"] == 3                                        # matplotlib runs every frame
     fell_back = [r for r in caplog.records if "render fell back" in r.getMessage()]
     assert len(fell_back) == 1                                      # warned once, silent thereafter
+
+
+# ---------------------------------------------------------------------------
+# Offscreen crash probe: the uncatchable-EGL-crash guard (subprocess probe)
+# ---------------------------------------------------------------------------
+# EGL init can SIGSEGV natively on hosts without a usable GPU/EGL stack — no
+# try/except can catch that in-process, so the dispatcher probes the offscreen
+# tier once in a throwaway child before its first in-process use. These tests
+# fake run_isolated (the child spawn) and the on-disk verdict cache to pin the
+# contract without ever touching the host's real Open3D.
+
+import bg3dtools.render as render_pkg
+
+
+@pytest.fixture()
+def probe_env(monkeypatch, tmp_path):
+    """Opt back into probing, hermetically: fresh cache dir, a fake open3d dist,
+    no EGL_PLATFORM, and 'open3d' guaranteed absent from sys.modules."""
+    monkeypatch.delenv("BG3DTOOLS_RENDER_PROBE", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.delenv("EGL_PLATFORM", raising=False)
+    monkeypatch.setattr(scan._importlib_metadata, "version", lambda dist: "0.19.0")
+    monkeypatch.delitem(scan.sys.modules, "open3d", raising=False)
+    monkeypatch.setattr(scan.sys, "platform", "linux")
+
+
+def _fake_run_isolated(monkeypatch, verdicts):
+    """Install a run_isolated stub returning the given verdicts in order; returns the call log."""
+    calls = []
+    def fake(fn, *a, **k):
+        calls.append(fn.__name__)
+        return verdicts[len(calls) - 1]
+    monkeypatch.setattr(render_pkg, "run_isolated", fake)
+    return calls
+
+
+def test_probe_crash_disables_offscreen_and_falls_through(probe_env, monkeypatch):
+    """A probe child that dies (native EGL crash) must disable the tier catchably:
+    the render still succeeds via a later tier and the real backend is never entered."""
+    pytest.importorskip("matplotlib")
+    probe_calls = _fake_run_isolated(monkeypatch, [False, False])   # plain + surfaceless both die
+    entered = []
+    monkeypatch.setattr(scan, "_exec_offscreen", lambda *a, **k: entered.append(1))
+    monkeypatch.setattr(scan, "_exec_legacy",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no display")))
+
+    imgs = _render_to_images([_full_scene()], _camera(), RenderOptions(width=64, height=64))
+    assert imgs[0].shape == (64, 64, 3)
+    assert entered == []                                            # offscreen never constructed in-process
+    assert probe_calls == ["_offscreen_probe_worker"] * 2
+    assert "EGL_PLATFORM" not in scan.os.environ                    # failed retry must not leak the env var
+    # dead verdict is memoized: further renders spawn no more probes
+    _render_to_images([_full_scene()], _camera(), RenderOptions(width=64, height=64))
+    assert len(probe_calls) == 2
+
+
+def test_probe_surfaceless_retry_adopts_env_and_enables_offscreen(probe_env, monkeypatch):
+    """Plain probe dies, surfaceless probe survives → EGL_PLATFORM is adopted for the
+    process and the offscreen tier runs in-process."""
+    probe_calls = _fake_run_isolated(monkeypatch, [False, True])
+    frame = np.zeros((64, 64, 3), np.uint8)
+    monkeypatch.setattr(scan, "_exec_offscreen", lambda *a, **k: [frame])
+
+    imgs = _render_to_images([_full_scene()], _camera(), RenderOptions(width=64, height=64))
+    assert imgs == [frame]
+    assert probe_calls == ["_offscreen_probe_worker"] * 2
+    assert scan.os.environ["EGL_PLATFORM"] == "surfaceless"
+
+
+def test_probe_verdict_cached_for_future_processes(probe_env, monkeypatch):
+    """The verdict lands in the on-disk cache; a 'fresh process' (reset memo) trusts it
+    without spawning any probe child."""
+    _fake_run_isolated(monkeypatch, [False, True])
+    monkeypatch.setattr(scan, "_exec_offscreen",
+                        lambda *a, **k: [np.zeros((8, 8, 3), np.uint8)])
+    _render_to_images([_full_scene()], _camera(), RenderOptions(width=8, height=8))
+
+    cache = scan.json.loads(scan._probe_cache_path().read_text())
+    assert list(cache.values()) == ["ok-surfaceless"]
+
+    scan._offscreen_probe_ok = None                                 # simulate a brand-new process
+    scan._dead_backends.clear()
+    monkeypatch.delenv("EGL_PLATFORM", raising=False)               # (fresh process env too)
+    second_calls = _fake_run_isolated(monkeypatch, [])              # any spawn would IndexError
+    _render_to_images([_full_scene()], _camera(), RenderOptions(width=8, height=8))
+    assert second_calls == []                                       # cache hit — no probe spawned
+    assert scan.os.environ["EGL_PLATFORM"] == "surfaceless"         # cached verdict re-applied
+
+
+def test_probe_respects_pinned_egl_platform(probe_env, monkeypatch):
+    """An explicit EGL_PLATFORM is the user's call: no surfaceless second-guessing."""
+    pytest.importorskip("matplotlib")
+    monkeypatch.setenv("EGL_PLATFORM", "x11")
+    probe_calls = _fake_run_isolated(monkeypatch, [False])
+    monkeypatch.setattr(scan, "_exec_legacy",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no display")))
+
+    _render_to_images([_full_scene()], _camera(), RenderOptions(width=8, height=8))
+    assert probe_calls == ["_offscreen_probe_worker"]               # exactly one probe, no retry
+    assert scan.os.environ["EGL_PLATFORM"] == "x11"                 # untouched
+
+
+def test_probe_never_mode_skips_probing_entirely(probe_env, monkeypatch):
+    """BG3DTOOLS_RENDER_PROBE=never restores pre-probe behavior (caller accepts crash risk)."""
+    monkeypatch.setenv("BG3DTOOLS_RENDER_PROBE", "never")
+    probe_calls = _fake_run_isolated(monkeypatch, [])
+    frame = np.zeros((8, 8, 3), np.uint8)
+    monkeypatch.setattr(scan, "_exec_offscreen", lambda *a, **k: [frame])
+    imgs = _render_to_images([_full_scene()], _camera(), RenderOptions(width=8, height=8))
+    assert imgs == [frame] and probe_calls == []
