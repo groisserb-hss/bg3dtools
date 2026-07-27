@@ -125,7 +125,8 @@ def normal_fold_score(
     if ref_normals is None:
         ref_normals = per_vertex_normals(reference_verts, faces)
     if cot_L is None:
-        # igl.cotmatrix is broken in igl 2.5.1 (returns all zeros)
+        # Negated: cotangent_weights uses the opposite sign convention, so this
+        # equals igl_compat.cotmatrix (to 1e-15).
         cot_L = -cotangent_weights(reference_verts, faces)
 
     S = cotangent_smooth_matrix(cot_L)

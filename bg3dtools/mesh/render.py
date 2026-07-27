@@ -25,7 +25,6 @@ import open3d as o3d
 import numpy as np
 import warnings
 from typing import Tuple, Union
-import igl
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
 

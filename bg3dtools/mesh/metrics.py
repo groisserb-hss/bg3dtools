@@ -5,8 +5,9 @@ This module provides functions for computing geodesic distances on meshes.
 """
 
 from typing import Optional
-import igl
 import numpy as np
+
+from bg3dtools.igl_compat import exact_geodesic, heat_geodesic
 
 __all__ = [
     "calc_geodesic",
@@ -53,8 +54,8 @@ def calc_geodesic(
     for ii, vv in enumerate(v_idx):
         src = np.array([vv], dtype=faces.dtype)
         if exact:
-            D[:, ii] = igl.exact_geodesic(verts, faces, vs=src, vt=dst)
+            D[:, ii] = exact_geodesic(verts, faces, src, dst)
         else:
-            D[:, ii] = igl.heat_geodesic(verts, faces, t, src)
+            D[:, ii] = heat_geodesic(verts, faces, t, src)
 
     return D

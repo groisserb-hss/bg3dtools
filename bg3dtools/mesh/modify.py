@@ -7,7 +7,16 @@ edge splitting, vertex count adjustment, and edge-face adjacency queries.
 
 from typing import Optional, Tuple, Union
 import numpy as np
-import igl
+
+from bg3dtools.igl_compat import (
+    bfs_orient,
+    decimate,
+    doublearea,
+    edges as igl_edges,
+    is_edge_manifold,
+    triangle_triangle_adjacency,
+    upsample,
+)
 
 from bg3dtools.mesh.utils import as_igl_faces
 
@@ -42,14 +51,14 @@ def edge_neighbors(
         Value is -1 for boundary edges with only one neighbor.
     """
     # int64 chokepoint: is_edge_manifold / triangle_triangle_adjacency misbehave on the int32
-    # faces that libigl's decimate/upsample/bfs_orient return on the Windows wheel.
+    # faces that decimate/upsample/bfs_orient propagate from an int32 input.
     faces = as_igl_faces(faces)
-    assert igl.is_edge_manifold(faces)
+    assert is_edge_manifold(faces)
 
     if face_adjacency is None:
-        face_adjacency = igl.triangle_triangle_adjacency(faces)[0]
+        face_adjacency = triangle_triangle_adjacency(faces)[0]
 
-    edges = igl.edges(faces)
+    edges = igl_edges(faces)
     nE = len(edges)
 
     # Build all face-edge pairs: 3 edges per face, sorted
@@ -159,7 +168,7 @@ def split_edge(
         faces = np.vstack([faces] + new_face_list)
         if ftex is not None:
             ftex = np.vstack([ftex] + new_ftex_list)
-    faces = as_igl_faces(igl.bfs_orient(faces)[0])  # bfs_orient returns int32 on the Windows wheel
+    faces = bfs_orient(faces)[0]  # igl_compat pins int64 (2.5.1 propagates int32 faces)
 
     if vtex is None and ftex is None:
         return verts, faces
@@ -206,7 +215,7 @@ def split_to_num_verts(
 
     while len(verts) < target_N:
         edges, edge_fidx = edge_neighbors(faces)
-        f_area = igl.doublearea(verts, faces) / 2
+        f_area = doublearea(verts, faces) / 2
         f_area = f_area / f_area.mean()
         edge_area = np.sum(f_area[edge_fidx], axis=1)
 
@@ -252,27 +261,24 @@ def resize_to_num_verts(
     AssertionError
         If mesh is not edge-manifold or decimation fails.
     """
-    assert igl.is_edge_manifold(faces), "Mesh must be edge manifold"
+    assert is_edge_manifold(faces), "Mesh must be edge manifold"
 
-    # igl.upsample/decimate return int32 faces on the Windows wheel; pin int64 after each so the
+    # igl_compat.upsample/decimate return int64 faces on every binding, so the
     # downstream is_edge_manifold checks (here and in edge_neighbors) never see int32.
     # if we have fewer faces than the target number of vertices, upsample by splitting faces
     while len(verts) < 0.98 * target_N:
-        verts, faces = igl.upsample(verts, faces)
-        faces = as_igl_faces(faces)
+        verts, faces = upsample(verts, faces)
 
     # first pass on decimation, keep 3 extra faces to try not to overshoot
     target_M = int(target_N / len(verts) * len(faces)) + 3
     if target_M < len(faces):
-        sucess, verts, faces, _, _ = igl.decimate(verts, faces, target_M)
-        faces = as_igl_faces(faces)
+        sucess, verts, faces, _, _ = decimate(verts, faces, target_M)
         assert sucess, "libigl decimation failed"
 
     # subsequent decimations try to hit the target number of vertices exactly
     while len(verts) > target_N:
         extra_verts = len(verts) - target_N
-        sucess, verts, faces, _, _ = igl.decimate(verts, faces, len(faces) - 2*extra_verts)
-        faces = as_igl_faces(faces)
+        sucess, verts, faces, _, _ = decimate(verts, faces, len(faces) - 2*extra_verts)
         assert sucess, "libigl decimation failed"
 
     # if we overshot, add vertices back in by edge splitting

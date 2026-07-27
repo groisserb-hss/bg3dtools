@@ -9,17 +9,22 @@ faces ``f`` plus index arrays such as ``exact_geodesic``'s source/target sets
 
 NumPy's default integer is int64 on Linux/macOS but int32 on Windows, and mesh
 I/O historically mixed the two, so this only ever bit on some hosts. These tests
-pin the two defenses: (1) ``match_index_dtype`` harmonizes index arrays to f's
-dtype at the call site; (2) the mesh readers canonicalize faces to int64.
+pin the remaining defenses: (1) ``match_index_dtype`` harmonizes index arrays to
+f's dtype at the call site; (2) the mesh readers canonicalize faces to int64.
+
+The primary defense now lives in :mod:`bg3dtools.igl_compat`, which pins every
+array index argument *and* return to int64 — see ``tests/test_igl_compat.py`` for
+the tests that libigl calls are structurally immune to the mismatch. This module
+keeps the tests for the two repo-level helpers and the call sites that depend on
+them.
 
 (Scalar index arguments — e.g. ``point_simplex_squared_distance``'s face index —
 are NOT subject to this matching, verified separately, so they need no fix.)
 """
 
 import numpy as np
-import pytest
-import igl
 
+from bg3dtools.igl_compat import all_boundary_loop, is_edge_manifold
 from bg3dtools.mesh.utils import match_index_dtype
 
 
@@ -53,32 +58,6 @@ def test_match_index_dtype_float_faces_fall_back_to_int64():
     # an empty / float face placeholder must still yield a usable integer dtype
     out = match_index_dtype(np.zeros((0, 3), dtype=np.float64), np.arange(2))
     assert out.dtype == np.int64
-
-
-# ---------------------------------------------------------------------------
-# The libigl constraint these defenses exist for
-# ---------------------------------------------------------------------------
-
-def test_exact_geodesic_rejects_mixed_dtypes():
-    """Mixed face/index integer dtypes raise — this is the bug we guard against."""
-    v, f = _mesh()
-    f32 = f.astype(np.int32)
-    vs = np.array([0], dtype=np.int64)            # int64 index vs int32 faces
-    vt = np.arange(v.shape[0], dtype=np.int64)
-    with pytest.raises(ValueError, match="Invalid type"):
-        igl.exact_geodesic(v, f32, vs, vt)
-
-
-@pytest.mark.parametrize("face_dtype", [np.int32, np.int64])
-def test_exact_geodesic_succeeds_when_harmonized(face_dtype):
-    """Harmonizing vs/vt to f.dtype (the fix pattern) works for any face dtype."""
-    v, f = _mesh()
-    ff = f.astype(face_dtype)
-    vs = match_index_dtype(ff, np.array([0], dtype=np.int64))
-    vt = match_index_dtype(ff, np.arange(v.shape[0], dtype=np.int64))
-    d = igl.exact_geodesic(v, ff, vs, vt)
-    assert d.shape == (v.shape[0],)
-    assert d[0] == pytest.approx(0.0, abs=1e-9)   # distance source→itself
 
 
 # ---------------------------------------------------------------------------
@@ -120,16 +99,16 @@ def test_make_manifold_survives_broken_collapse(monkeypatch, caplog):
     """
     from bg3dtools.mesh import clean
     v, f = _closed_tetra()
-    monkeypatch.setattr(clean.igl, "doublearea", lambda vv, ff: np.array([1e-30]))
+    monkeypatch.setattr(clean, "doublearea", lambda vv, ff: np.array([1e-30]))
     monkeypatch.setattr(
-        clean.igl, "collapse_small_triangles",
+        clean, "collapse_small_triangles",
         lambda vv, ff, t: np.vstack([np.asarray(ff), np.asarray(ff)[:1]]),  # dup a face
     )
     with caplog.at_level("WARNING"):
         v2, f2 = clean.make_manifold(v.copy(), f.copy())        # must not raise
     assert f2.dtype == np.int64                                 # int64 pinned
-    assert not igl.all_boundary_loop(f2)                        # closed
-    assert igl.is_edge_manifold(f2)                             # edge-manifold
+    assert not all_boundary_loop(f2)                             # closed
+    assert is_edge_manifold(f2)                                 # edge-manifold
     assert np.array_equal(np.sort(f2, 1), np.sort(f, 1))        # reverted to input
     assert "retaining the pre-collapse mesh" in caplog.text
 
@@ -137,10 +116,11 @@ def test_make_manifold_survives_broken_collapse(monkeypatch, caplog):
 # ---------------------------------------------------------------------------
 # as_igl_faces + class-2 (int32-return) guards
 #
-# Some libigl wheels (Windows) return int32 faces from remove_unreferenced /
-# decimate / upsample / bfs_orient regardless of input dtype, and the manifold
-# predicates (is_edge_manifold / all_boundary_loop) then misbehave on int32.
-# as_igl_faces pins int64 at those libigl boundaries; these guard the pins.
+# The libigl bindings propagate the input face dtype out of remove_unreferenced /
+# decimate / upsample / bfs_orient, and the manifold predicates
+# (is_edge_manifold / all_boundary_loop) then misbehave on int32. igl_compat now
+# pins int64 on both sides of every igl call; as_igl_faces keeps the *repo-wide*
+# face dtype canonical for the non-igl consumers. These guard both.
 # ---------------------------------------------------------------------------
 
 def test_as_igl_faces_forces_contiguous_int64():
@@ -158,23 +138,23 @@ def test_submesh_pins_int64_even_if_remove_unreferenced_returns_int32(monkeypatc
     manifold checks and every other submesh caller (error.py, vertebrae.py, ...)."""
     from bg3dtools.mesh import utils
     v, f = _mesh()
-    real = utils.igl.remove_unreferenced
+    real = utils.remove_unreferenced
     def int32_return(V, F):
         nv, nf, i, j = real(V, F)
         return nv, np.ascontiguousarray(nf, np.int32), i, j            # emulate the Windows wheel
-    monkeypatch.setattr(utils.igl, "remove_unreferenced", int32_return)
+    monkeypatch.setattr(utils, "remove_unreferenced", int32_return)
     _, nf = utils.submesh(v, f, np.array([True, True, False]), return_indices=False)
     assert nf.dtype == np.int64
 
 
 def test_edge_neighbors_canonicalizes_faces_before_manifold_predicate(monkeypatch):
-    """edge_neighbors must pin int64 before igl.is_edge_manifold so a wheel that (wrongly) reports
-    int32 faces as non-manifold does not fire the assert. Emulates that wheel behaviour: without
+    """edge_neighbors must pin int64 before is_edge_manifold so a binding that (wrongly) reports
+    int32 faces as non-manifold does not fire the assert. Emulates that behaviour: without
     the int64 chokepoint, passing int32 faces would raise AssertionError."""
     from bg3dtools.mesh import modify
     v, f = _mesh()
-    real_iem = modify.igl.is_edge_manifold
-    monkeypatch.setattr(modify.igl, "is_edge_manifold",
+    real_iem = modify.is_edge_manifold
+    monkeypatch.setattr(modify, "is_edge_manifold",
                         lambda F: real_iem(F) if F.dtype == np.int64 else False)
     edges, neigh = modify.edge_neighbors(f.astype(np.int32))           # must NOT raise
     assert len(edges) == len(neigh)

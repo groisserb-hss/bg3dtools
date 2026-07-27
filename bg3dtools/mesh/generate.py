@@ -6,8 +6,9 @@ as triangle meshes, including cylinders, cubes, planes, and icosahedra.
 """
 
 from typing import Optional, Tuple, Union
-import igl
 import numpy as np
+
+from bg3dtools.igl_compat import cylinder
 
 __all__ = [
     "build_cylinder_capped",
@@ -49,7 +50,7 @@ def build_cylinder_capped(
     """
     if nR < 0 or nC < 3:
         raise ValueError('nR, nC must be positive')
-    v, f = igl.cylinder(nR, nC)
+    v, f = cylinder(nR, nC)
     nV = len(v)
 
     # add vertex in the center of top and bottom caps

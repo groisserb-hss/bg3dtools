@@ -7,12 +7,26 @@ including making meshes manifold, filling holes, and removing degenerate faces.
 
 import logging
 
-import igl
 from scipy.stats import mode
 import numpy as np
 from typing import Tuple, Optional, Union
 import scipy.sparse as sparse
 
+from bg3dtools.igl_compat import (
+    AVAILABLE as IGL_AVAILABLE,
+    all_boundary_loop,
+    barycenter,
+    bfs_orient,
+    collapse_small_triangles,
+    doublearea,
+    ears as igl_ears,
+    facet_components,
+    is_edge_manifold,
+    is_vertex_manifold,
+    remove_unreferenced,
+    resolve_duplicated_faces,
+    triangle_triangle_adjacency,
+)
 from bg3dtools.mesh.utils import submesh, sample_E2V, mesh_volume, extract_manifold_patches, as_igl_faces
 
 log = logging.getLogger(__name__)
@@ -140,12 +154,12 @@ def remove_ears(
     faces : (nF', 3) ndarray
         Cleaned faces without ear triangles.
     """
-    ears = np.atleast_1d(igl.ears(faces)[0])
+    ears = np.atleast_1d(igl_ears(faces)[0])
     while len(ears) > 0:
         mask = np.ones(len(faces), dtype=bool)
         mask[ears] = False
         verts, faces = submesh(verts, faces, mask, return_indices=False)
-        ears = np.atleast_1d(igl.ears(faces)[0])
+        ears = np.atleast_1d(igl_ears(faces)[0])
 
     return verts, faces
 
@@ -242,7 +256,7 @@ def fill_hole(verts: np.ndarray, faces: np.ndarray, boundary_vidx: np.ndarray) -
 
         # remove faces that are outside of polygon
         flatF = patch['triangles']
-        bc = igl.barycenter(flatV, flatF).reshape(-1, 2)
+        bc = barycenter(flatV, flatF).reshape(-1, 2)
         flatF = flatF[_points_in_polygon(bc, flatV)]
         patch['triangles'] = flatF
         new_faces = boundary_vidx[flatF]
@@ -371,12 +385,12 @@ def fill_hole_safe(
     faces : (nF', 3) ndarray
         Faces with the hole closed.
     """
-    faces = as_igl_faces(faces)  # int64: is_edge_manifold misbehaves on int32 (Windows wheel)
-    if igl.is_edge_manifold(faces):
+    faces = as_igl_faces(faces)  # int64: keep the returned candidate faces canonical
+    if is_edge_manifold(faces):
         try:
             candidate = fill_hole(verts, faces, boundary_vidx)
             if (candidate.shape[0] > faces.shape[0]
-                    and igl.is_edge_manifold(candidate)):
+                    and is_edge_manifold(candidate)):
                 return verts, candidate
         except Exception:
             # Delaunay path raised (e.g., triangle library rejected the
@@ -419,7 +433,7 @@ def smooth_face_mask(
     smoothed : (nF,) bool ndarray
         Cleaned mask, thresholded at 0.5.
     """
-    TT, _ = igl.triangle_triangle_adjacency(faces)
+    TT, _ = triangle_triangle_adjacency(faces)
     self_idx = np.arange(len(faces))[:, None]
     neigh = np.where(TT >= 0, TT, self_idx)
 
@@ -458,7 +472,7 @@ def largest_component_mask(faces: np.ndarray, mask: np.ndarray) -> np.ndarray:
         return mask.copy()
 
     sub_idx = np.where(mask)[0]
-    labels = igl.facet_components(faces[sub_idx])
+    labels = facet_components(faces[sub_idx])
     largest = int(np.bincount(labels).argmax())
 
     out = np.zeros(len(faces), dtype=bool)
@@ -513,8 +527,8 @@ def close_end_caps(
         Total number of large loops detected. Equals `n_expected` in the
         happy case; differs when topology is unexpected.
     """
-    faces = as_igl_faces(faces)  # int64: all_boundary_loop misbehaves on int32 (Windows wheel)
-    loops = igl.all_boundary_loop(faces)
+    faces = as_igl_faces(faces)  # int64: keep the returned loop/face arrays canonical
+    loops = all_boundary_loop(faces)
     if not loops:
         return verts, faces, 0
 
@@ -566,12 +580,17 @@ def nonmanifold_verts(faces: np.ndarray, nV: Optional[int] = None) -> Tuple[np.n
     ff = np.column_stack(3*[np.arange(nF)]).flatten()
     V2F = sparse.csr_matrix((np.ones(3*nF), (faces.flatten(), ff)), shape=(nV, nF))
 
-    # Fast path: use igl.is_vertex_manifold if available (igl >= 2.5)
-    if hasattr(igl, 'is_vertex_manifold'):
-        manifold = igl.is_vertex_manifold(faces.astype(np.int64))
+    # Fast path: libigl's own predicate, present only in igl >= 2.6 (see igl_compat)
+    if 'is_vertex_manifold' in IGL_AVAILABLE:
+        # The mask is only as long as the highest referenced index, which falls
+        # short of nV whenever trailing vertices are unreferenced; those are
+        # never non-manifold, so pad with True.
+        manifold = is_vertex_manifold(faces)
+        if manifold.size < nV:
+            manifold = np.concatenate([manifold, np.ones(nV - manifold.size, dtype=bool)])
         referenced = np.zeros(nV, dtype=bool)
         referenced[np.unique(faces)] = True
-        nmv = np.where(referenced & ~manifold)[0]
+        nmv = np.where(referenced & ~manifold[:nV])[0]
     else:
         # Fallback: per-vertex patch check
         nmv = []
@@ -741,11 +760,11 @@ def make_manifold(
         return verts, faces, vtex, ftex
 
     def _is_manifold_and_closed(faces):
-        # all_boundary_loop / is_edge_manifold report spurious non-manifoldness on the int32
-        # faces the Windows wheel returns from the in-loop submesh/bfs_orient calls; pin int64.
+        # all_boundary_loop / is_edge_manifold report spurious non-manifoldness on int32
+        # faces; igl_compat pins int64 at the igl boundary, this keeps the local copy so too.
         faces = as_igl_faces(faces)
-        return (not igl.all_boundary_loop(faces)
-                and igl.is_edge_manifold(faces)
+        return (not all_boundary_loop(faces)
+                and is_edge_manifold(faces)
                 and nonmanifold_verts(faces)[0].size == 0)
 
     def _fill_all_boundaries(verts, faces, vtex, ftex):
@@ -757,7 +776,7 @@ def make_manifold(
         verts.shape[0] and faces.shape[0] after the call, so the same
         helper handles both paths.
         """
-        for loop in igl.all_boundary_loop(faces):
+        for loop in all_boundary_loop(faces):
             loop = np.asarray(loop)
             # Cache the centroid attribute now (the fan path would consume it
             # before vtex grows). Delaunay path simply ignores it.
@@ -778,8 +797,8 @@ def make_manifold(
                 ])
         return verts, faces, vtex, ftex
 
-    # libigl returns int32 faces on some wheels (Windows) and the manifold predicates
-    # below misbehave on int32; canonicalize once up front so the whole routine stays int64.
+    # The manifold predicates below misbehave on int32 faces; canonicalize once up front
+    # so the whole routine stays int64 whatever the caller passed in.
     faces = as_igl_faces(faces)
 
     # Initial: keep only the largest manifold patch.
@@ -802,7 +821,7 @@ def make_manifold(
         # Delaunay fill — wound in the same direction as the existing
         # boundary traversal — would flag every boundary edge of the
         # fill, prompting catastrophic face removal.
-        oriented, _ = igl.bfs_orient(faces)
+        oriented, _ = bfs_orient(faces)
         faces = np.asarray(oriented, dtype=faces.dtype)
 
         # Now remove faces incident to truly non-manifold edges
@@ -824,11 +843,11 @@ def make_manifold(
 
         # Re-orient again so the convergence check below sees a
         # consistently-wound mesh.
-        oriented, _ = igl.bfs_orient(faces)
+        oriented, _ = bfs_orient(faces)
         faces = np.asarray(oriented, dtype=faces.dtype)
 
         # Drop duplicate faces.
-        ff, fidx = igl.resolve_duplicated_faces(faces)
+        ff, fidx = resolve_duplicated_faces(faces)
         if len(faces) > len(ff):
             verts, faces, f_idx, v_idx = submesh(verts, faces, fidx)
             if vtex is not None:
@@ -854,7 +873,7 @@ def make_manifold(
 
     # Post-loop: a single pass of small-triangle collapse, then one
     # follow-up fan-fill in case collapse created new boundaries.
-    a = (np.min(igl.doublearea(verts, faces)) / bounding_box_diagonal(verts) ** 2) / 2
+    a = (np.min(doublearea(verts, faces)) / bounding_box_diagonal(verts) ** 2) / 2
     if a < area_thresh:
         # The main loop above already produced a manifold + closed mesh;
         # this collapse is only cosmetic thin-sliver cleanup. Pin int64
@@ -870,10 +889,10 @@ def make_manifold(
         safe = (verts, faces, vtex, ftex)
         f_map = {tuple(f): idx for idx, f in enumerate(faces)}
         collapsed = np.ascontiguousarray(
-            igl.collapse_small_triangles(verts, faces, area_thresh), dtype=np.int64)
+            collapse_small_triangles(verts, faces, area_thresh), dtype=np.int64)
         if ftex is not None:
             ftex = ftex[[f_map[tuple(fc)] for fc in collapsed]]
-        verts, faces, i, j = igl.remove_unreferenced(verts, collapsed)
+        verts, faces, i, j = remove_unreferenced(verts, collapsed)
         faces = np.ascontiguousarray(faces, dtype=np.int64)
         if vtex is not None:
             vtex = vtex[j]
@@ -894,7 +913,7 @@ def make_manifold(
             verts, faces, vtex, ftex = safe
 
     if double_check:
-        assert igl.is_edge_manifold(faces)
+        assert is_edge_manifold(faces)
         assert nonmanifold_verts(faces)[0].size == 0
 
     # Drop any disjoint debris introduced by repairs.

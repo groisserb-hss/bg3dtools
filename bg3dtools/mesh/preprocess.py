@@ -11,14 +11,20 @@ from os.path import splitext, isfile
 import os
 from typing import List, Optional, Tuple, Type
 
-import igl
 import numpy as np
 from scipy.stats import mode
 from tqdm import tqdm
 
 from bg3dtools.pointclouds.fitting import fit_plane_to_noisy_points, project_to_plane, align_axes, fit_plane_to_points
+from bg3dtools.igl_compat import (
+    average_onto_faces,
+    cylinder,
+    doublearea,
+    point_mesh_squared_distance,
+    write_triangle_mesh,
+)
 from bg3dtools.mesh import read_triangle_mesh
-from bg3dtools.mesh.utils import submesh, per_vertex_normals
+from bg3dtools.mesh.utils import submesh, per_vertex_normals, extract_manifold_patches
 from bg3dtools.transforms_unified import inverse, transform_points_forward, make_aff
 from bg3dtools.utils import HiddenPrints
 
@@ -102,7 +108,7 @@ class MeshCleaner:
             basename = splitext(self.filename)[0]
             outfile = basename + self.out_suff
 
-        igl.write_triangle_mesh(outfile, self.mesh.verts, self.mesh.faces)
+        write_triangle_mesh(outfile, self.mesh.verts, self.mesh.faces)
 
     @property
     def name(self) -> str:
@@ -175,7 +181,7 @@ class MeshCleaner:
         p = self.polyfit
         expected_surface_area = p[0] * (weight**2) + p[1] * weight + p[2]
         v, f = self.numpy_geometry()
-        sa = np.sum(igl.doublearea(v, f)) if len(f) > 0 else 0
+        sa = np.sum(doublearea(v, f)) if len(f) > 0 else 0
 
         intact = sa > thresh * expected_surface_area
         self.log.debug('  %s found to be %s' % (self.filename, 'intact' if intact else 'DEFECTIVE'))
@@ -288,14 +294,14 @@ class MeshCleaner:
             full_mask = np.ones(len(v), dtype=bool)
             vidx = vidx[rail_mask]
             full_mask[vidx] = False
-            f_mask = np.round(igl.average_onto_faces(f, full_mask.astype(np.float32)))
+            f_mask = np.round(average_onto_faces(f, full_mask.astype(np.float32)))
             self.submesh(f_mask)
         else:
             self.log.info('   no handrail detected')
 
     def remove_loose(self) -> None:
         f = self.numpy_geometry()[1]
-        p = igl.extract_manifold_patches(f)[1]
+        p = extract_manifold_patches(f)[1]
         # f_mask = p == mode(p, keepdims=False)[0]  # numpy version?
         f_mask = p == mode(p)[0]
         self.submesh(f_mask)
@@ -340,7 +346,7 @@ class MeshCleaner:
             H, X_mov_transformed, _, _ = icp.run(max_overlap_distance=self.rail_height)
 
         # parse outputs
-        d2 = igl.point_mesh_squared_distance(X_mov_transformed, template_v, template_f)[0]
+        d2 = point_mesh_squared_distance(X_mov_transformed, template_v, template_f)[0]
         inlier_mask = d2 < self.icp_inlier_thresh**2
         final_tform = H @ init_tform
         vertical_mag = abs(final_tform[0, self.up_axis])
@@ -353,7 +359,7 @@ class MeshCleaner:
         rail_roc = self.rail_roc
 
         # straight pole
-        v, f = igl.cylinder(64, 1024)
+        v, f = cylinder(64, 1024)
         nV = len(v)
         v[:, [0, 1]] *= rail_rad
         v[:, 2] -= 0.5
