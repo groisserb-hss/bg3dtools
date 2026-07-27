@@ -73,6 +73,7 @@ __all__ = [
     "all_boundary_loop",
     "average_onto_faces",
     "barycenter",
+    "barycentric_coordinates_tri",
     "bfs_orient",
     "boundary_loop",
     "collapse_small_triangles",
@@ -155,6 +156,9 @@ _adjacency_matrix = _sym("adjacency_matrix", "adjacency_matrix")
 _all_boundary_loop = _sym("all_boundary_loop", "all_boundary_loop", "boundary_loop_all")
 _average_onto_faces = _sym("average_onto_faces", "average_onto_faces")
 _barycenter = _sym("barycenter", "barycenter")
+_barycentric_coordinates_tri = _sym(
+    "barycentric_coordinates_tri", "barycentric_coordinates_tri", "barycentric_coordinates"
+)
 _bfs_orient = _sym("bfs_orient", "bfs_orient")
 _boundary_loop = _sym("boundary_loop", "boundary_loop")
 _collapse_small_triangles = _sym("collapse_small_triangles", "collapse_small_triangles")
@@ -767,36 +771,67 @@ def point_mesh_squared_distance(
     return _flt1d(sqr_d, n), _idx1d(i, n), _flt2d(c, p.shape[1])
 
 
+def barycentric_coordinates_tri(
+    p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray
+) -> np.ndarray:
+    """Barycentric coordinates of points *p* within triangles ``(a, b, c)``.
+
+    One triangle per query point: all four arguments are ``(nP, dim)``. Points
+    outside their triangle get coordinates outside ``[0, 1]``; degenerate
+    triangles yield ``NaN`` (both bindings), which callers usually replace with
+    ``1/3``.
+
+    Contract: ``(nP, 3)`` float64, C-contiguous.
+
+    2.6: **RENAMED** to ``igl.barycentric_coordinates`` (the tri/tet distinction
+    moved into the argument count). Values agree exactly and both are insensitive
+    to array storage order. 2.5.1 squeezes the result to ``(3,)`` when
+    ``nP == 1``; normalized here. Verified on both.
+    """
+    if _barycentric_coordinates_tri is None:
+        _missing("barycentric_coordinates_tri",
+                 "barycentric_coordinates_tri", "barycentric_coordinates")
+    p, a, b, c = (_flt(x) for x in (p, a, b, c))
+    if p.ndim == 1:
+        p, a, b, c = p[None, :], a[None, :], b[None, :], c[None, :]
+    return _flt2d(_barycentric_coordinates_tri(p, a, b, c), 3)
+
+
 def point_simplex_squared_distance(
     p: np.ndarray, v: np.ndarray, ele: np.ndarray, i: int
 ) -> Tuple[float, np.ndarray, np.ndarray]:
-    """Squared distance from one point to one simplex of a mesh.
+    """Squared distance from the single point *p* to simplex *i* of a mesh.
 
     Contract: ``(sqrD: float, c: (dim,) float64, bc: (ss,) float64)`` — the
-    distance, the closest point and its barycentric coordinates.
+    distance, the closest point on that simplex, and its barycentric coordinates.
+    *p* is ONE ``dim``-long point, not a batch; use
+    :func:`point_mesh_squared_distance` for batches.
 
     2.6: **REMOVED** — raises ``RuntimeError``. Note *i* is a scalar index and so
     is exempt from the array-dtype matching libigl enforces elsewhere.
     Verified 2.5.1-only.
 
-    Warning
-    -------
-    **The igl 2.5.1 binding computes this wrong.** It reads *v* in Fortran
-    (column-major) order, so a normal C-contiguous vertex array yields a "closest
-    point" that does not lie on the mesh at all — e.g. for a planar mesh in
-    ``z == 0`` it returns points with ``z != 0``. Passing ``np.asfortranarray(v)``
-    produces the correct answer, which is how the misread was identified.
+    Notes
+    -----
+    **The igl 2.5.1 binding misreads *v*: it expects column-major storage.** Fed a
+    normal C-contiguous vertex array it returns a "closest point" that is not on
+    the mesh at all — e.g. for a planar mesh in ``z == 0`` it returns points with
+    ``z != 0``. This wrapper therefore passes ``np.asfortranarray(v)``, which is
+    correct: checked against an independent point-triangle reference (Ericson,
+    *Real-Time Collision Detection* §5.1.5) over 1387 point/face pairs across three
+    meshes, max error 8.9e-16, where the C-order call was right in only 24 of them.
+    ``ele`` and ``p`` are order-insensitive.
 
-    That workaround is deliberately **not** applied here: it would change
-    numerical results for ``mesh.highD.HighDimMesh``, whose nearest-point search
-    is built on this call, and this module's remit is compatibility, not fixing
-    upstream algorithms. Pinned by
-    ``tests/test_igl_compat.py::test_point_simplex_squared_distance_misreads_column_major_verts``
-    and tracked as a follow-up.
+    This is the one place where the layer **changes** 2.5.1's numerical answers
+    rather than preserving them — the previous answers were simply wrong. It fixes
+    ``mesh.highD.HighDimMesh``, whose nearest-point search is built on this call.
     """
     if _point_simplex_squared_distance is None:
         _missing("point_simplex_squared_distance", "point_simplex_squared_distance")
-    out = _point_simplex_squared_distance(_flt(p), _flt(v), _idx(ele), int(i))
+    # reshape(-1): a (1, dim) point silently yields a different wrong answer
+    out = _point_simplex_squared_distance(
+        _flt(p).reshape(-1), np.asfortranarray(v, dtype=np.float64), _idx(ele), int(i)
+    )
     if not isinstance(out, tuple) or len(out) != 3:
         _unexpected("point_simplex_squared_distance", out)
     sqr_d, c, bc = out

@@ -33,8 +33,9 @@ Subpackages that wrap an optional dep import cleanly even without the extra inst
 **igl 2.5.1 is the canonical version** — `environment.yml` pins it, from conda-forge (PyPI
 has no macOS-arm64 wheels). igl 2.6 is a nanobind rewrite of the bindings with breaking
 changes to names, return arity and dtypes, so all libigl access goes through
-`bg3dtools.igl_compat`, which presents the 2.5.1 contract on either version. Import from
-there rather than calling `igl.*` directly. To check a candidate igl version:
+`bg3dtools.igl_compat` (`spectral_match` included), which presents the 2.5.1 contract on
+either version. Import from there rather than calling `igl.*` directly. To check a
+candidate igl version:
 
 ```bash
 conda create -y -n igl261 -c conda-forge python=3.12 igl=2.6.1 numpy scipy pytest

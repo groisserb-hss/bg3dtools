@@ -149,8 +149,14 @@ impossible through the layer. **Never feature-detect by version string** —
 The nastiest 2.6 change is `exact_geodesic`: the positional signature went from
 `(v, f, vs, vt)` to `(V, F, VS, FS, VT, FT)`, so a 4-positional call binds target
 *vertices* to the source *faces* slot and returns an **empty array instead of raising**.
-The wrapper always calls by keyword. Also note `igl.point_simplex_squared_distance` is
-outright wrong in 2.5.1 (it reads vertices column-major); see its wrapper docstring.
+The wrapper always calls by keyword.
+
+One wrapper deliberately **changes** 2.5.1's numbers rather than preserving them:
+`igl.point_simplex_squared_distance` misreads the vertex matrix as column-major, so fed a
+normal C-contiguous `V` it returns "closest points" that are not on the mesh. The wrapper
+passes `asfortranarray(v)`, checked against an independent point-triangle reference over
+1387 point/face pairs. This fixes `mesh.highD.MeshProjector`, whose nearest-point search
+was off by up to 1.9 in squared distance.
 
 `tests/test_igl_compat.py` pins every contract and is import-light on purpose, so it runs
 in a bare scratch env. To check a candidate igl version:
@@ -163,8 +169,12 @@ conda create -y -n igl261 -c conda-forge python=3.12 igl=2.6.1 numpy scipy pytes
 Functions absent from one binding are skipped there and flagged in `AVAILABLE`: 2.6
 removed `extract_manifold_patches`, `collapse_small_triangles`,
 `resolve_duplicated_faces` and `point_simplex_squared_distance`; 2.5.1 lacks
-`is_vertex_manifold`. `spectral_match/` still imports `igl` directly and has **not** been
-migrated.
+`is_vertex_manifold`. `spectral_match/` goes through the layer too.
+
+Where a module wraps an igl function under the *same* name (`mesh.laplace.gaussian_curvature`,
+`mesh.utils.per_vertex_normals`, …), import the compat function as `igl_<name>` — an
+unaliased import binds a name the module's own `def` overwrites, so the wrapper ends up
+calling itself. A test enforces this across both packages.
 
 ## macOS Open3D Rendering Caveat
 

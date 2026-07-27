@@ -23,7 +23,6 @@ are NOT subject to this matching, verified separately, so they need no fix.)
 """
 
 import numpy as np
-import pytest
 
 from bg3dtools.igl_compat import all_boundary_loop, is_edge_manifold
 from bg3dtools.mesh.utils import match_index_dtype

@@ -8,11 +8,11 @@ extraction between a source and target mesh.
 
 import logging
 import numpy as np
-import igl
 from scipy.sparse import coo_matrix
 from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
 
+from bg3dtools.igl_compat import point_mesh_squared_distance
 from bg3dtools.mesh.clean import make_manifold
 from bg3dtools.mesh.modify import resize_to_num_verts
 from bg3dtools.mesh.utils import mesh_volume
@@ -67,7 +67,7 @@ def pmf_match(src_hr, dst_orig, config, src=None, dst=None):
 
     for _ in range(10):
         query_on_template = per_vertex_smoothing(query_on_template, dst.f)
-        query_on_template = igl.point_mesh_squared_distance(query_on_template, src_hr.v, src_hr.f)[2]
+        query_on_template = point_mesh_squared_distance(query_on_template, src_hr.v, src_hr.f)[2]
 
     # upsample the query to the original mesh resolution
     up_map = project_to_bccoord(dst.v, dst.f, dst_orig.v, return_map=True)[2]
@@ -302,7 +302,7 @@ class TemplateMapper:
         # smooth vertex positions but make sure they stay on the query manifold
         # for ii in range(5):
         # template_on_query = per_vertex_smoothing(template_on_query, self.processed.f)
-        # template_on_query = igl.point_mesh_squared_distance(template_on_query, query.v, query.f)[2]
+        # template_on_query = point_mesh_squared_distance(template_on_query, query.v, query.f)[2]
 
         # revert to original resolution
         template_mapped = self.template_l2h @ template_on_query

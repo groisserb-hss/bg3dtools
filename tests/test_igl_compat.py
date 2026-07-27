@@ -151,8 +151,16 @@ def test_no_module_shadows_the_names_it_imports_from_igl_compat():
 
     import bg3dtools
 
+    repo_root = pathlib.Path(bg3dtools.__path__[0]).parent
+    sources = []
+    for pkg in ("bg3dtools", "spectral_match"):
+        pkg_dir = repo_root / pkg
+        if pkg_dir.is_dir():                      # spectral_match may not be installed
+            sources.extend(sorted(pkg_dir.rglob("*.py")))
+    assert sources, "found no package sources to scan"
+
     offenders = []
-    for path in sorted(pathlib.Path(bg3dtools.__path__[0]).rglob("*.py")):
+    for path in sources:
         src = path.read_text()
         if "igl_compat" not in src:
             continue
@@ -543,6 +551,33 @@ def test_average_onto_faces_argument_order():
     assert out == pytest.approx([1 / 3, 2 / 3])
 
 
+def test_barycentric_coordinates_tri_rename_and_contract():
+    """igl 2.6 renamed this to barycentric_coordinates (tri/tet split by arity)."""
+    a = np.tile([0., 0., 0.], (3, 1))
+    b = np.tile([1., 0., 0.], (3, 1))
+    c = np.tile([0., 1., 0.], (3, 1))
+    q = np.array([[0., 0., 0.],          # corner a
+                  [1 / 3, 1 / 3, 0.],    # centroid
+                  [0.5, 0.5, 0.]])       # midpoint of edge bc
+    bc = ic.barycentric_coordinates_tri(q, a, b, c)
+    assert_float(bc, (3, 3))
+    assert bc == pytest.approx(np.array([[1, 0, 0],
+                                         [1 / 3, 1 / 3, 1 / 3],
+                                         [0, 0.5, 0.5]]))
+    # reconstructing from the coordinates returns the query points
+    tri = np.stack([a, b, c], axis=1)
+    assert np.einsum('ij,ijk->ik', bc, tri) == pytest.approx(q)
+
+
+def test_barycentric_coordinates_tri_single_point_stays_two_dimensional():
+    """2.5.1 squeezes the result to (3,) for one point; the contract is (nP, 3)."""
+    bc = ic.barycentric_coordinates_tri(
+        np.array([[0.25, 0.25, 0.]]), np.array([[0., 0., 0.]]),
+        np.array([[1., 0., 0.]]), np.array([[0., 1., 0.]]))
+    assert_float(bc, (1, 3))
+    assert bc[0] == pytest.approx([0.5, 0.25, 0.25])
+
+
 def test_cotmatrix_and_intrinsic_delaunay_cotmatrix():
     import scipy.sparse as sp
     v, f = _icosahedron()
@@ -641,10 +676,6 @@ def test_collapse_small_triangles_leaves_a_healthy_mesh_alone():
 @pytest.mark.skipif("point_simplex_squared_distance" not in ic.AVAILABLE,
                     reason="removed in igl 2.6")
 def test_point_simplex_squared_distance_contract():
-    """Only the *shape* contract is asserted — the 2.5.1 binding's values are wrong.
-
-    See :func:`test_point_simplex_squared_distance_misreads_column_major_verts`.
-    """
     v, f = _quad()
     sqr_d, closest, bc = ic.point_simplex_squared_distance(
         np.array([0.25, 0.25, 2.0]), v, f, 0)
@@ -652,35 +683,99 @@ def test_point_simplex_squared_distance_contract():
     assert_float(closest, (3,))
     assert_float(bc, (3,))
     assert bc.sum() == pytest.approx(1.0)
+    # the query sits directly above face 0, so the closest point is straight down
+    assert sqr_d == pytest.approx(4.0)
+    assert closest == pytest.approx([0.25, 0.25, 0.0])
+
+
+def _ref_closest_point_on_tri(p, a, b, c):
+    """Independent closest-point-on-triangle reference.
+
+    Ericson, *Real-Time Collision Detection* §5.1.5. Used to check libigl rather
+    than assume it: the 2.5.1 binding misreads the vertex matrix's storage order,
+    which is why :func:`bg3dtools.igl_compat.point_simplex_squared_distance`
+    passes ``asfortranarray(v)``.
+    """
+    ab, ac, ap = b - a, c - a, p - a
+    d1, d2 = ab @ ap, ac @ ap
+    if d1 <= 0 and d2 <= 0:
+        return a
+    bp = p - b
+    d3, d4 = ab @ bp, ac @ bp
+    if d3 >= 0 and d4 <= d3:
+        return b
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0 <= d1 and d3 <= 0:
+        return a + (d1 / (d1 - d3)) * ab
+    cq = p - c
+    d5, d6 = ab @ cq, ac @ cq
+    if d6 >= 0 and d5 <= d6:
+        return c
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0 <= d2 and d6 <= 0:
+        return a + (d2 / (d2 - d6)) * ac
+    va = d3 * d6 - d5 * d4
+    if va <= 0 and (d4 - d3) >= 0 and (d5 - d6) >= 0:
+        return b + ((d4 - d3) / ((d4 - d3) + (d5 - d6))) * (c - b)
+    denom = 1.0 / (va + vb + vc)
+    return a + ab * (vb * denom) + ac * (vc * denom)
 
 
 @pytest.mark.skipif("point_simplex_squared_distance" not in ic.AVAILABLE,
                     reason="removed in igl 2.6")
-def test_point_simplex_squared_distance_misreads_column_major_verts():
-    """KNOWN BUG in the igl 2.5.1 binding, pinned here so any fix is deliberate.
+def test_point_simplex_squared_distance_matches_an_independent_reference():
+    """The wrapper corrects the 2.5.1 binding's column-major misread of ``v``.
 
-    ``igl.point_simplex_squared_distance`` reads the vertex matrix in **Fortran
-    (column-major)** order, so a normal C-contiguous ``V`` yields a "closest
-    point" that is not even on the mesh. Passing ``np.asfortranarray(v)`` gives
-    the right answer, which is how the misread was diagnosed.
-
-    ``igl_compat`` deliberately does NOT apply that workaround: correcting it
-    would change numerical results for ``mesh.highD.HighDimMesh``, whose nearest
-    -point search is built on this call, and that is a behavior change rather
-    than a compatibility fix. Tracked as a follow-up; this test documents the
-    hazard and fails loudly if the underlying binding is ever fixed.
+    Without ``asfortranarray(v)`` the binding returns closest points that are not
+    on the mesh at all. Every point/face pair below is checked against
+    :func:`_ref_closest_point_on_tri`, spanning the face interior, the edges and
+    the vertices — i.e. every branch of the closest-point algorithm.
     """
-    import igl  # deliberately raw: this pins the *binding's* behavior, not the layer's
+    rng = np.random.RandomState(0)
+    for v, f in (_quad(), _icosahedron(), _two_islands()):
+        lo, hi = v.min(0) - 0.6, v.max(0) + 0.6
+        queries = np.vstack([v,                            # on vertices
+                             v[f].mean(1),                 # face interiors
+                             v[f][:, :2].mean(1),          # over edges
+                             rng.rand(15, 3) * (hi - lo) + lo])
+        for q in queries:
+            for i in range(len(f)):
+                sqr_d, closest, bc = ic.point_simplex_squared_distance(q, v, f, i)
+                want = _ref_closest_point_on_tri(q, *v[f[i]])
+                assert closest == pytest.approx(want, abs=1e-9)
+                assert sqr_d == pytest.approx(np.sum((q - want) ** 2), abs=1e-9)
+                # the closest point must lie on the simplex it was asked about
+                assert bc @ v[f[i]] == pytest.approx(closest, abs=1e-9)
+                assert bc.sum() == pytest.approx(1.0)
+                assert np.all(bc >= -1e-12)
+
+
+@pytest.mark.skipif("point_simplex_squared_distance" not in ic.AVAILABLE,
+                    reason="removed in igl 2.6")
+def test_point_simplex_min_over_faces_matches_point_mesh_squared_distance():
+    """The two distance queries must agree — they did not before the storage fix."""
+    rng = np.random.RandomState(1)
+    v, f = _icosahedron()
+    pts = rng.rand(25, 3) * 4 - 2
+    per_face_min = np.array([
+        min(ic.point_simplex_squared_distance(q, v, f, i)[0] for i in range(len(f)))
+        for q in pts
+    ])
+    assert per_face_min == pytest.approx(ic.point_mesh_squared_distance(pts, v, f)[0])
+
+
+@pytest.mark.skipif("point_simplex_squared_distance" not in ic.AVAILABLE,
+                    reason="removed in igl 2.6")
+def test_point_simplex_squared_distance_accepts_a_row_vector_point():
+    """A (1, dim) query is the same single point as a (dim,) one.
+
+    The raw binding silently returns a *different* wrong answer for the row-vector
+    form, so the wrapper flattens.
+    """
     v, f = _quad()
-    on_face_0 = np.array([0.9, 0.1, 0.0])           # exactly on triangle (0, 1, 2)
-
-    correct = igl.point_simplex_squared_distance(on_face_0, np.asfortranarray(v), f, 0)
-    assert correct[0] == pytest.approx(0.0), "F-order V is the one that works"
-
-    wrong = ic.point_simplex_squared_distance(on_face_0, v, f, 0)
-    assert wrong[0] > 0.5, "C-order V still misreads; remove this test once fixed"
-    # the reported closest point is off the z=0 plane the whole mesh lies in
-    assert abs(wrong[1][2]) > 1e-6
+    p = np.array([0.25, 0.25, 2.0])
+    assert (ic.point_simplex_squared_distance(p[None, :], v, f, 0)[0]
+            == pytest.approx(ic.point_simplex_squared_distance(p, v, f, 0)[0]))
 
 
 @pytest.mark.skipif("is_vertex_manifold" not in ic.AVAILABLE,

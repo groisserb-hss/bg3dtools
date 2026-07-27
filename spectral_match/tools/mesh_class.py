@@ -12,11 +12,12 @@ import logging
 import os
 from time import time
 
-import igl
 import numpy as np
 from scipy import sparse
 
 from . import geometric_utilities as util
+from bg3dtools.igl_compat import boundary_loop, write_triangle_mesh
+from bg3dtools.igl_compat import per_vertex_normals as igl_per_vertex_normals
 from bg3dtools.mesh.mesh_io import read_triangle_mesh
 from bg3dtools.mesh.utils import as_igl_faces
 from bg3dtools.mesh.laplace import laplace_eigen_decomposition, gaussian_curvature
@@ -244,7 +245,8 @@ class Mesh:
     @property
     def normals(self) -> np.ndarray:
         if self.__normals.size == 0:
-            self.__normals = igl.per_vertex_normals(
+            # weighting=0 is UNIFORM (0/1/2 = uniform/area/angle in both bindings)
+            self.__normals = igl_per_vertex_normals(
                 self.__v, self.__f, weighting=0
             )
         return self.__normals
@@ -360,7 +362,7 @@ class Mesh:
 
     def centre_on_boundary(self) -> None:
         b = util.boundary_vertices(self.f)
-        temp = igl.boundary_loop(self.f)
+        temp = boundary_loop(self.f)
         assert all([v in temp for v in b])
         self.__v -= self.v[b].mean()
         return
@@ -424,7 +426,7 @@ class Mesh:
     def write(self, fn: str, method: str = "vedo") -> bool:
         ret = False
         if method == "igl":
-            ret = igl.write_triangle_mesh(fn, self.v, self.f)
+            ret = write_triangle_mesh(fn, self.v, self.f)
         else:
             self.vedo().write(fn)
             ret = True
