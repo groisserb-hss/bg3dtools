@@ -8,7 +8,7 @@ averaging with their mirror reflection.
 import numpy as np
 from bg3dtools.mesh.registration import nonrigid_ICP
 from bg3dtools.mesh.utils import surface_sample, per_vertex_normals
-from igl import point_mesh_squared_distance
+from bg3dtools.igl_compat import point_mesh_squared_distance
 
 __all__ = [
     "symmetrize",

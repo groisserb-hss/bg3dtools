@@ -7,8 +7,12 @@ and biharmonic embeddings on triangle meshes.
 """
 
 from typing import List, Tuple
-import igl
 import numpy as np
+
+from bg3dtools.igl_compat import (
+    boundary_loop,
+    gaussian_curvature as igl_gaussian_curvature,  # this module defines its own wrapper
+)
 from scipy import sparse
 from scipy.sparse import diags, spmatrix
 from scipy.sparse.linalg import eigsh, lobpcg, spsolve
@@ -343,8 +347,8 @@ def gaussian_curvature(
     curvature : (n,) ndarray
         Gaussian curvature per vertex. Boundary vertices set to 0.
     """
-    s = igl.gaussian_curvature(v, f)
-    b = igl.boundary_loop(f)
+    s = igl_gaussian_curvature(v, f)
+    b = boundary_loop(f)
     s[b] = 0
     s[np.isnan(s)] = 0
     return s

@@ -28,6 +28,19 @@ pip install -e '.[all]'           # or grab the lot
 
 Subpackages that wrap an optional dep import cleanly even without the extra installed — the optional symbols become `None` and only raise when called.
 
+### libigl version
+
+**igl 2.5.1 is the canonical version** — `environment.yml` pins it, from conda-forge (PyPI
+has no macOS-arm64 wheels). igl 2.6 is a nanobind rewrite of the bindings with breaking
+changes to names, return arity and dtypes, so all libigl access goes through
+`bg3dtools.igl_compat`, which presents the 2.5.1 contract on either version. Import from
+there rather than calling `igl.*` directly. To check a candidate igl version:
+
+```bash
+conda create -y -n igl261 -c conda-forge python=3.12 igl=2.6.1 numpy scipy pytest
+~/opt/anaconda3/envs/igl261/bin/python -m pytest tests/test_igl_compat.py -v
+```
+
 ## Modules
 
 | Module | Purpose |
@@ -38,6 +51,7 @@ Subpackages that wrap an optional dep import cleanly even without the extra inst
 | `pose_landmarking/` | MediaPipe pose detection, joint mapping, segmentation |
 | `image_tools/` | Packing, filters, video I/O, volumetric similarity metrics |
 | `iphone/` | iOS depth scanning data I/O (Stray Scanner & Record3D) |
+| `igl_compat.py` | libigl version-compatibility wrappers (the only module importing `igl`) |
 | `render/` | Visualization via trimesh, Open3D, matplotlib |
 | `utils/` | Timing, FPS, PCA, filesystem, stats |
 | `transforms_unified.py` | Rotation/affine transforms (twist/quaternion/matrix) |

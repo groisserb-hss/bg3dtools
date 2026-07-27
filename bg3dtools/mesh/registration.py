@@ -12,7 +12,6 @@ import random
 from typing import Tuple, Optional
 
 import numpy as np
-import igl
 import scipy.sparse as sparse
 from scipy.sparse.linalg import factorized
 from scipy.spatial import KDTree
@@ -20,6 +19,7 @@ from scipy.spatial import KDTree
 from bg3dtools.mesh.utils import (per_face_normals, per_vertex_normals,
                                      surface_sample, sample_E2V, row_normalize_csr,
                                      ordered_edges)
+from bg3dtools.igl_compat import point_mesh_squared_distance
 from bg3dtools.mesh.laplace import cotangent_weights
 from bg3dtools.mesh.barycentric import points_to_barycentric, bc2sparse
 from bg3dtools.mesh.distortion import normal_fold_score
@@ -372,7 +372,7 @@ def surface_match(
         If distance calculation produces non-finite values.
     """
     # find the closest points on mesh
-    d2, fidx, proj = igl.point_mesh_squared_distance(pts, mesh_verts, mesh_faces)
+    d2, fidx, proj = point_mesh_squared_distance(pts, mesh_verts, mesh_faces)
     if np.any(np.isfinite(d2) == False):
         raise ValueError('distance calculation failed')
     matched_faces = mesh_faces[fidx, :]
@@ -554,7 +554,7 @@ def affine_ICP(
     while not scheduler.complete:
         ii = scheduler.steps
         # find closest points on mesh using moved points
-        d2, _, surf_points = igl.point_mesh_squared_distance(regpoints, verts, faces)
+        d2, _, surf_points = point_mesh_squared_distance(regpoints, verts, faces)
 
         # filter out points not close to surface
         prct = 100 * (1 - ii / max_iters) + pthresh * (ii / max_iters)

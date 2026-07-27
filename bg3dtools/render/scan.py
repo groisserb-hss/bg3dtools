@@ -158,8 +158,8 @@ class RenderOptions:
 
 def _wireframe_edges(faces: np.ndarray) -> np.ndarray:
     """Extract unique edges from a face array.  Returns (E, 2) int64."""
-    import igl
-    return igl.edges(faces.astype(np.int64))
+    from bg3dtools.igl_compat import edges
+    return edges(faces)
 
 
 def _height_colormap(pts: np.ndarray, vertical_axis: int = 1) -> np.ndarray:

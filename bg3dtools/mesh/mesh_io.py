@@ -78,7 +78,10 @@ def read_obj(
     """
     Read an OBJ file with texture coordinates.
 
-    Wrapper for libigl that handles different API versions.
+    Kept as a public import path (``bg3dtools.mesh.mesh_io.read_obj``); the
+    version-compatibility work — igl 2.6 renamed ``read_obj`` to ``readOBJ`` —
+    lives in :func:`bg3dtools.igl_compat.read_obj`, which also pins dtypes and
+    un-squeezes single-row blocks.
 
     Parameters
     ----------
@@ -87,26 +90,22 @@ def read_obj(
 
     Returns
     -------
-    verts : (nV, 3) ndarray
+    verts : (nV, 3) float64 ndarray
         Vertex coordinates.
-    tc : (nT, 2) ndarray
+    tc : (nT, 2) float64 ndarray
         Texture coordinates.
-    n : (nN, 3) ndarray
+    n : (nN, 3) float64 ndarray
         Vertex normals.
-    faces : (nF, 3) ndarray
+    faces : (nF, 3) int64 ndarray
         Face vertex indices.
-    ftc : (nF, 3) ndarray
+    ftc : (nF, 3) int64 ndarray
         Face texture coordinate indices.
-    fn : (nF, 3) ndarray
+    fn : (nF, 3) int64 ndarray
         Face normal indices.
     """
-    import igl
-    try:
-        verts, tc, n, faces, ftc, fn = igl.read_obj(obj_file)
-    except AttributeError:
-        verts, tc, n, faces, ftc, fn = igl.readOBJ(obj_file)
+    from bg3dtools.igl_compat import read_obj as _read_obj
 
-    return verts, tc, n, faces, ftc, fn
+    return _read_obj(obj_file)
 
 
 def load_textured_obj(

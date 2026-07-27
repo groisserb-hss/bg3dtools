@@ -111,6 +111,7 @@ from bg3dtools.pytorch import TorchBackend, infer_backend  # if torch installed
 | `utils/` | Timing, algorithms (FPS, PCA), filesystem, stats |
 | `utils/cifs_wrappers/` | Network filesystem I/O with exponential backoff retry |
 | `transforms_unified.py` | Rotation/affine transforms (twist/quaternion/matrix) |
+| `igl_compat.py` | libigl version-compatibility wrappers — the only module that imports `igl` |
 
 ### spectral_match package
 
@@ -118,6 +119,52 @@ Separate package (included in setuptools config) for dense mesh correspondence u
 - `spectral_match/pipeline.py` - `FunctionalMapper` orchestrates eigendecomposition → descriptors → functional map solving → product manifold filtering
 - Uses bg3dtools mesh utilities for Laplacian computation and I/O
 - Configured via `SigConfig` and `MatchConfig` namedtuples
+
+## libigl Version Compatibility — `igl_compat`
+
+**igl 2.5.1 is canonical** (conda-forge; `environment.yml` pins it). igl 2.6 is a full
+rewrite of the python bindings (pybind11 → nanobind) with breaking changes to names,
+return arity, return order and dtypes. A machine that drifted to 2.6.1 took down a
+downstream pipeline, so all libigl access is now funnelled through one module.
+
+**`bg3dtools/igl_compat.py` is the only place in the package that does `import igl`.**
+Every wrapper presents the 2.5.1 contract regardless of which binding is installed, and
+each one documents its 2.6 behavior. Never call `igl.*` directly — add a wrapper instead.
+
+```python
+from bg3dtools.igl_compat import facet_components, doublearea, AVAILABLE
+
+labels = facet_components(faces)     # bare (nF,) int64 array, never a tuple
+if 'is_vertex_manifold' in AVAILABLE:   # use this, not hasattr(igl, ...)
+    ...
+```
+
+Beyond per-function fixes the layer guarantees repo-wide: **int64 C-contiguous index
+arrays, float64 C-contiguous coordinate arrays**, and a preserved leading dimension even
+when it is 1 (the 2.5.1 binding squeezes those). The int64 pinning applies to *inputs*
+too, which makes the index-dtype mismatch noted under Testing Patterns structurally
+impossible through the layer. **Never feature-detect by version string** —
+`igl.__version__` does not exist in the 2.6.1 conda build.
+
+The nastiest 2.6 change is `exact_geodesic`: the positional signature went from
+`(v, f, vs, vt)` to `(V, F, VS, FS, VT, FT)`, so a 4-positional call binds target
+*vertices* to the source *faces* slot and returns an **empty array instead of raising**.
+The wrapper always calls by keyword. Also note `igl.point_simplex_squared_distance` is
+outright wrong in 2.5.1 (it reads vertices column-major); see its wrapper docstring.
+
+`tests/test_igl_compat.py` pins every contract and is import-light on purpose, so it runs
+in a bare scratch env. To check a candidate igl version:
+
+```bash
+conda create -y -n igl261 -c conda-forge python=3.12 igl=2.6.1 numpy scipy pytest
+~/opt/anaconda3/envs/igl261/bin/python -m pytest tests/test_igl_compat.py -v
+```
+
+Functions absent from one binding are skipped there and flagged in `AVAILABLE`: 2.6
+removed `extract_manifold_patches`, `collapse_small_triangles`,
+`resolve_duplicated_faces` and `point_simplex_squared_distance`; 2.5.1 lacks
+`is_vertex_manifold`. `spectral_match/` still imports `igl` directly and has **not** been
+migrated.
 
 ## macOS Open3D Rendering Caveat
 
@@ -148,5 +195,6 @@ Tests use these conventions:
 - **Known-answer tests**: Apply known transform, recover parameters, assert roundtrip
 - **Cross-backend testing**: Verify numpy and PyTorch produce equivalent results
 - **Test mesh fixtures**: `_icosahedron()`, `_subdivided_icosahedron()`, `_unit_tetrahedron()`
+- **Cross-version testing**: `tests/test_igl_compat.py` must pass on igl 2.5.1 *and* 2.6.1 — keep it import-light (numpy/scipy only) so it runs in a bare scratch env. See the libigl Version Compatibility section.
 - **Note**: igl.cotmatrix and igl.massmatrix are broken in igl 2.5.1; custom implementations in `mesh/laplace.py` are used instead
-- **Note**: libigl requires every *array* integer argument of a call (faces `f` + index arrays like `exact_geodesic`'s `vs`/`vt`) to share one integer dtype, else it raises `ValueError: Invalid type (int64 ...) ... Expected it to match argument 'f'`. NumPy's default int is int64 on Linux/macOS but int32 on Windows, so this only bites on some hosts. Defenses: mesh readers in `mesh/mesh_io.py` canonicalize faces to **int64**, and multi-index call sites route their index arrays through `mesh/utils.match_index_dtype(f, *arrays)`. Guarded by `tests/test_igl_index_dtype.py`. (Scalar index args, e.g. `point_simplex_squared_distance`'s face index, are exempt.)
+- **Note**: libigl requires every *array* integer argument of a call (faces `f` + index arrays like `exact_geodesic`'s `vs`/`vt`) to share one integer dtype, else it raises `ValueError: Invalid type (int64 ...) ... Expected it to match argument 'f'`. NumPy's default int is int64 on Linux/macOS but int32 on Windows, so this only bites on some hosts. `igl_compat` now removes this hazard structurally by pinning every array index argument to int64 on the way in. Two repo-level helpers remain for the non-igl consumers: mesh readers in `mesh/mesh_io.py` canonicalize faces to **int64**, and `mesh/utils.as_igl_faces` / `match_index_dtype(f, *arrays)` keep hand-built face arrays canonical. Guarded by `tests/test_igl_index_dtype.py`. (Scalar index args, e.g. `point_simplex_squared_distance`'s face index, are exempt.)

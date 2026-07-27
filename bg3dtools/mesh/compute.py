@@ -7,8 +7,9 @@ computing geometric transformations.
 
 import logging
 from typing import Optional, Tuple
-import igl
 import numpy as np
+
+from bg3dtools.igl_compat import intrinsic_delaunay_cotmatrix
 from bg3dtools.mesh.utils import per_face_normals
 from bg3dtools.mesh.barycentric import project_to_bccoord
 from scipy.spatial import KDTree
@@ -63,7 +64,7 @@ def heat_equation(
     log = logging.getLogger('heat_equation')
     nV = verts.shape[0]
 
-    A = igl.intrinsic_delaunay_cotmatrix(verts, faces)[0]
+    A = intrinsic_delaunay_cotmatrix(verts, faces)[0]
     a = np.abs(A.diagonal())
     scale = np.percentile(a, 97)
     A *= (step / scale)
