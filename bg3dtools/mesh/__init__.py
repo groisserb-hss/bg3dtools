@@ -75,6 +75,7 @@ from .registration import (
     nonrigid_ICP,
     discrete_match,
     surface_match,
+    transfer_vertex_field,
     fit_vertices,
     affine_ICP,
 )
@@ -90,6 +91,7 @@ from .clean import (
     fill_hole_fan,
     fill_hole_safe,
     smooth_face_mask,
+    dilate_vertex_mask,
     largest_component_mask,
     close_end_caps,
     nonmanifold_edges,
@@ -175,6 +177,7 @@ __all__ = [
     "nonrigid_ICP",
     "discrete_match",
     "surface_match",
+    "transfer_vertex_field",
     "fit_vertices",
     "affine_ICP",
     # Clean
@@ -187,6 +190,7 @@ __all__ = [
     "fill_hole_fan",
     "fill_hole_safe",
     "smooth_face_mask",
+    "dilate_vertex_mask",
     "largest_component_mask",
     "close_end_caps",
     "nonmanifold_edges",

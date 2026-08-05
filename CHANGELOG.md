@@ -7,6 +7,24 @@ section of `CLAUDE.md`.
 The 1.0.0 and 1.0.1 entries below were reconstructed from git history after the
 fact; they were never written at release time.
 
+## Unreleased
+
+### Added
+
+- **`mesh.clean.dilate_vertex_mask`** — grow a per-vertex boolean mask by N rings
+  of edge adjacency. Purely topological, so growth stays inside the connected
+  component(s) the mask already touches and never jumps to a detached shell that
+  happens to lie nearby. Callers wanting a margin in metres still need Dijkstra
+  over an edge-length-weighted adjacency; the docstring says so.
+- **`mesh.registration.transfer_vertex_field`** — carry a per-vertex field (any
+  dtype, including bool) onto another mesh's points by nearest source vertex,
+  with an optional `max_dist` beyond which points take a fill value instead of
+  being painted by a far-away match. Nearest-vertex rather than nearest-surface
+  because interpolating a discrete label across a triangle is meaningless;
+  `surface_match` remains the right primitive for continuous fields.
+
+Both were written independently in a downstream project first.
+
 ## 1.0.2 — 2026-07-27
 
 The first release in which `pyproject.toml` and `bg3dtools.__version__` actually

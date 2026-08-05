@@ -31,6 +31,7 @@ __all__ = [
     "nonrigid_ICP",
     "discrete_match",
     "surface_match",
+    "transfer_vertex_field",
     "fit_vertices",
     "affine_ICP",
 ]
@@ -381,6 +382,70 @@ def surface_match(
     bc = points_to_barycentric(mesh_verts[matched_faces, :], proj)
 
     return d2, fidx, bc
+
+
+def transfer_vertex_field(
+    src_verts: np.ndarray,
+    src_field: np.ndarray,
+    dst_pts: np.ndarray,
+    max_dist: Optional[float] = None,
+    fill=0,
+) -> np.ndarray:
+    """Carry a per-vertex field from one mesh onto the points of another.
+
+    Each destination point takes the value of its nearest *source vertex*.
+    Correspondence is by position alone, so the two meshes must already be in a
+    common frame and in the same units; nothing here aligns them.
+
+    Nearest-vertex, not nearest-surface-point: it needs no source topology and
+    is what a discrete label or mask wants, since interpolating a label across a
+    triangle is not meaningful. For a continuous field where the source
+    tessellation is coarse relative to the destination, prefer `surface_match`
+    plus barycentric interpolation, which does not quantise to source vertices.
+
+    Parameters
+    ----------
+    src_verts : (nS, 3) ndarray
+        Source vertex positions.
+    src_field : (nS,) or (nS, C) ndarray
+        Values carried by the source vertices. Any dtype, including bool.
+    dst_pts : (nD, 3) ndarray
+        Destination points — typically another mesh's vertices.
+    max_dist : float, optional
+        Destination points further than this from every source vertex take
+        `fill` instead of a transferred value. Without it every point takes a
+        value however far away its match is, which silently paints geometry the
+        source never covered. Same units as the coordinates.
+    fill : scalar
+        Value for points beyond `max_dist`. Defaults to 0, which is False for a
+        boolean field.
+
+    Returns
+    -------
+    values : (nD,) or (nD, C) ndarray
+        Same trailing shape and dtype as `src_field`.
+
+    Examples
+    --------
+    Move a boolean region from a registration onto a raw scan::
+
+        scan_mask = transfer_vertex_field(reg_verts, reg_mask, scan_verts,
+                                          max_dist=0.08, fill=False)
+    """
+    src_verts = np.asarray(src_verts, dtype=np.float64)
+    dst_pts = np.asarray(dst_pts, dtype=np.float64)
+    field = np.asarray(src_field)
+    if len(field) != len(src_verts):
+        raise ValueError(f"src_field has {len(field)} rows, src_verts has {len(src_verts)}")
+
+    dist, idx = KDTree(src_verts).query(dst_pts, k=1)
+    out = field[idx]
+    if max_dist is not None:
+        too_far = dist > max_dist
+        if field.ndim > 1:
+            too_far = too_far[:, None]
+        out = np.where(too_far, np.asarray(fill, dtype=field.dtype), out)
+    return out.astype(field.dtype, copy=False)
 
 
 def fit_vertices(
