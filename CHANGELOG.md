@@ -23,7 +23,15 @@ fact; they were never written at release time.
   because interpolating a discrete label across a triangle is meaningless;
   `surface_match` remains the right primitive for continuous fields.
 
-Both were written independently in a downstream project first.
+- **`mesh.laplace.taubin_smoothing`** — Taubin lambda|mu low-pass filtering with an
+  optional pinned set. The module already had implicit cotangent smoothing but no
+  shrinkage-free filter, so downstream code that measures a smoothed surface
+  against its input was reaching for plain Laplacian steps — which are
+  mean-curvature flow, and report contraction as if it were feature removal.
+  Measured on a unit icosphere at 60 iterations: Taubin holds mean radius at
+  0.997, plain Laplacian collapses it to 0.506.
+
+All three were written independently in a downstream project first.
 
 ## 1.0.2 — 2026-07-27
 
