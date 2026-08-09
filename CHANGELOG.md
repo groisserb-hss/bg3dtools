@@ -11,6 +11,18 @@ fact; they were never written at release time.
 
 ### Added
 
+- **`mesh.stitch`** (new module) — bridge two nearby open boundaries into one
+  connected surface, adding faces only, never vertices (so "every output vertex
+  is bit-identical to an input vertex" survives stitching).
+  - `cut_edges(faces, face_mask)` — the exact boundary a face deletion exposes:
+    edges shared between a kept and a deleted face. Pre-existing hole edges
+    border at most one face and can never qualify, so "don't bridge to holes"
+    falls out of the definition. No manifold assumption.
+  - `zipper_loop_to_edges(verts, loop, cut_verts, *, axis, center, gap_max,
+    span_split_rad)` — angular parametrisation about a seam axis, contiguous
+    runs zipped to the loop by a greedy shortest-diagonal march, winding set by
+    a radial outward test, spans without geometry left open. Returns the bridge
+    faces plus span/coverage bookkeeping.
 - **`mesh.clean.dilate_vertex_mask`** — grow a per-vertex boolean mask by N rings
   of edge adjacency. Purely topological, so growth stays inside the connected
   component(s) the mask already touches and never jumps to a detached shell that
