@@ -107,14 +107,20 @@ def zipper_loop_to_edges(
         Vertex indices of the opposite boundary, unordered and possibly
         fragmented (e.g. from :func:`cut_edges`).
     axis : (3,) ndarray, optional
-        Seam axis. Default: normal of the best-fit plane of ``cut_verts``.
+        Seam axis. Default: normal of the best-fit plane of the LOOP -- the loop
+        is a complete ring by construction, while the cut side may be missing
+        whole sectors, and a frame fit to the fragmented side is biased away from
+        its holes (which mis-measures every angle, including the holes').
     center : (3,) ndarray, optional
-        Point on the axis. Default: centroid of ``cut_verts``.
+        Point on the axis. Default: centroid of the loop, for the same reason.
     gap_max : float, optional
         A cut vertex farther than this from its nearest loop vertex is left
         unbridged. Default: no limit.
     span_split_rad : float
-        Angular gap between consecutive cut vertices that starts a new run.
+        Angular gap between consecutive cut vertices that starts a new run. The
+        effective threshold is ``max(span_split_rad, 3 * median gap)``, so a
+        coarsely sampled rim is not shattered into single-vertex runs -- a hole
+        is a gap much larger than the typical spacing, not an absolute angle.
 
     Returns
     -------
@@ -136,9 +142,9 @@ def zipper_loop_to_edges(
             "n_spans": 0, "n_open_spans": 0, "bridged_fraction": 0.0,
             "n_skipped_far": 0}
 
-    c = P[cv].mean(axis=0) if center is None else np.asarray(center, np.float64)
+    c = P[loop].mean(axis=0) if center is None else np.asarray(center, np.float64)
     if axis is None:
-        _, _, Vt = np.linalg.svd(P[cv] - c, full_matrices=False)
+        _, _, Vt = np.linalg.svd(P[loop] - P[loop].mean(axis=0), full_matrices=False)
         n = Vt[-1]
     else:
         n = np.asarray(axis, np.float64)
@@ -170,15 +176,19 @@ def zipper_loop_to_edges(
     order = np.argsort(th_c)
     cv, th_c = cv[order], th_c[order]
 
-    # split into contiguous angular runs, starting at the widest gap
+    # split into contiguous angular runs, starting at the widest gap; the split
+    # threshold adapts to the typical spacing so coarse rims stay whole
     gaps = np.diff(np.concatenate([th_c, [th_c[0] + 2 * np.pi]]))
+    split_at = max(float(span_split_rad), 3.0 * float(np.median(gaps)))
     start = int(np.argmax(gaps)) + 1
     cv = np.roll(cv, -start)
     th_c = np.roll(th_c, -start)
     th_c = np.unwrap(th_c)  # monotone within the rolled ordering
-    breaks = np.flatnonzero(np.diff(th_c) > span_split_rad) + 1
+    breaks = np.flatnonzero(np.diff(th_c) > split_at) + 1
     runs = np.split(np.arange(len(cv)), breaks)
-    closed = gaps.max() <= span_split_rad and len(runs) == 1
+    # strictly less: a gap AT the threshold is a hole, and wrapping across it
+    # would bridge to geometry that is not there
+    closed = gaps.max() < split_at and len(runs) == 1
 
     all_faces: list = []
     covered = 0.0
