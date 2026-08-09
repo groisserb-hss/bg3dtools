@@ -27,7 +27,8 @@ from bg3dtools.igl_compat import (
     resolve_duplicated_faces,
     triangle_triangle_adjacency,
 )
-from bg3dtools.mesh.utils import submesh, sample_E2V, mesh_volume, extract_manifold_patches, as_igl_faces
+from bg3dtools.mesh.utils import (submesh, sample_E2V, mesh_volume, extract_manifold_patches,
+                                  as_igl_faces, adj_from_edges)
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ __all__ = [
     "fill_hole_fan",
     "fill_hole_safe",
     "smooth_face_mask",
+    "dilate_vertex_mask",
     "largest_component_mask",
     "close_end_caps",
     "nonmanifold_edges",
@@ -442,6 +444,66 @@ def smooth_face_mask(
         neighbor_mean = x[neigh].mean(axis=1)
         x = (1 - weight) * x + weight * neighbor_mean
     return x > 0.5
+
+
+def dilate_vertex_mask(
+    faces: np.ndarray,
+    mask: np.ndarray,
+    n_rings: int = 1,
+    nV: Optional[int] = None,
+) -> np.ndarray:
+    """Grow a per-vertex boolean mask by `n_rings` rings of edge adjacency.
+
+    Purely topological: each ring adds every vertex sharing an edge with the
+    current mask. The margin it produces is therefore `n_rings` times the local
+    edge length, so on a mesh of uneven resolution it is wider where triangles
+    are larger. When a *metric* margin is required regardless of tessellation,
+    run Dijkstra over an edge-length-weighted adjacency instead.
+
+    Growth is confined to the connected component(s) the mask already touches —
+    a detached shell is never reached, however close it lies in space.
+
+    Parameters
+    ----------
+    faces : (nF, 3) ndarray
+        Triangle indices.
+    mask : (nV,) bool ndarray
+        Seed selection.
+    n_rings : int
+        Number of adjacency rings to add. Zero or negative returns a copy.
+    nV : int, optional
+        Vertex count. Taken from `mask` when omitted.
+
+    Returns
+    -------
+    grown : (nV,) bool ndarray
+
+    See Also
+    --------
+    smooth_face_mask : clean up a noisy per-face mask.
+
+    Examples
+    --------
+    A per-face mask dilates through the same call, via its vertices::
+
+        vmask = np.zeros(len(verts), bool)
+        vmask[faces[fmask]] = True
+        fmask_grown = dilate_vertex_mask(faces, vmask, 1)[faces].any(axis=1)
+    """
+    mask = np.asarray(mask, dtype=bool)
+    if nV is None:
+        nV = len(mask)
+    if n_rings <= 0 or not mask.any():
+        return mask.copy()
+
+    f = np.asarray(faces, dtype=np.int64)
+    E = np.vstack([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
+    A = adj_from_edges(E, nV)
+
+    out = mask.copy()
+    for _ in range(int(n_rings)):
+        out = out | (A @ out.astype(np.float64) > 0)
+    return out
 
 
 def largest_component_mask(faces: np.ndarray, mask: np.ndarray) -> np.ndarray:

@@ -6,7 +6,7 @@ cotangent weight matrices, mass matrices, eigendecompositions, curvature,
 and biharmonic embeddings on triangle meshes.
 """
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 import numpy as np
 
 from bg3dtools.igl_compat import (
@@ -17,12 +17,15 @@ from scipy import sparse
 from scipy.sparse import diags, spmatrix
 from scipy.sparse.linalg import eigsh, lobpcg, spsolve
 
+from bg3dtools.mesh.utils import adj_from_edges
+
 __all__ = [
     "cotangent_weights",
     "lumped_vertex_areas",
     "fem_mass_matrix",
     "laplace_beltrami_operator",
     "laplace_eigen_decomposition",
+    "taubin_smoothing",
     "laplacian_smoothing",
     "laplacian_smoothing_batch",
     "gaussian_curvature",
@@ -267,6 +270,75 @@ def _laplacian_smooth_invariants(
         m_inv_l = spsolve(m_csc, l_csc)
     ql = l_csc.T @ m_inv_l
     return m_csc, ql
+
+
+def taubin_smoothing(
+    verts: np.ndarray,
+    faces: np.ndarray,
+    n_iters: int = 10,
+    lam: float = 0.9,
+    mu: float = -0.905,
+    pinned: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Taubin lambda|mu smoothing — low-pass filtering without shrinkage.
+
+    Each iteration is a shrink step at `lam` followed by an inflate step at `mu`,
+    on the row-normalised (uniform) Laplacian. With `lam > 0 > mu` and
+    `|mu| > lam` the transfer function passes low frequencies at ~1 and attenuates
+    high ones, so features are removed while overall scale is preserved.
+
+    Use this rather than repeated plain Laplacian steps whenever the result is
+    measured against the input. Plain Laplacian smoothing is mean-curvature flow:
+    it contracts the surface without bound, so a "how much did the surface move"
+    statistic reports contraction rather than the feature removal it is meant to
+    measure, and enough iterations collapse the mesh to a point.
+
+    Explicit, so there is no linear system to be near-singular, and stable for
+    `lam < 1` because the row-normalised Laplacian has spectrum in [0, 2].
+
+    Parameters
+    ----------
+    verts : (nV, 3) ndarray
+    faces : (nF, 3) ndarray
+    n_iters : int
+        Number of lambda|mu pairs. Zero returns a copy.
+    lam, mu : float
+        Shrink and inflate factors. The defaults are the standard
+        near-cancelling pair; `mu` must be negative and `|mu| > lam`.
+    pinned : (nV,) bool ndarray, optional
+        Vertices held fixed — typically a boundary ring, so a patch stays
+        attached to the surface it was cut from. Note that pinning a ring while
+        the interior contracts leaves a step at the ring; feather the result if
+        that matters.
+
+    Returns
+    -------
+    smoothed : (nV, 3) ndarray, float64
+
+    See Also
+    --------
+    laplacian_smoothing : implicit, cotangent-weighted, single large step.
+    """
+    v = np.asarray(verts, dtype=np.float64).copy()
+    f = np.asarray(faces, dtype=np.int64)
+    if n_iters <= 0 or not len(f):
+        return v
+    if not (mu < 0 < lam and abs(mu) > lam):
+        raise ValueError(f"need lam > 0 > mu and |mu| > lam; got lam={lam}, mu={mu}")
+
+    e = np.vstack([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]])
+    A = adj_from_edges(e, len(v))
+    deg = np.maximum(np.asarray(A.sum(axis=1)).ravel(), 1.0)[:, None]
+
+    free = slice(None)
+    if pinned is not None:
+        free = ~np.asarray(pinned, dtype=bool)
+
+    for _ in range(int(n_iters)):
+        for step in (lam, mu):
+            delta = (A @ v) / deg - v
+            v[free] += step * delta[free]
+    return v
 
 
 def laplacian_smoothing(
