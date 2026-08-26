@@ -283,14 +283,14 @@ def deidentify_face_rgb(
         y3 = (b3[1] + b3[3]) / 2
         # assert abs(x3 - x2) < (s // 20), 'face detection and landmark detection do not match'
         # assert abs(y3 - y2) < (s // 20), 'face detection and landmark detection do not match'
-		
-		# The two estimates legitimately disagree on camera-ring views of the
-		# back of the head. Never crash de-identification over it — blur MORE,
-		# not less: the union below covers both candidate regions either way.
- 		if abs(x3 - x2) >= (s // 20) or abs(y3 - y2) >= (s // 20):
-			log.warning('face detector and pose-landmark head box disagree '
-						'(|dx|=%d, |dy|=%d, tol=%d px) — pixelating the '
- 						'union of both', abs(x3 - x2), abs(y3 - y2), s // 20)
+
+        # The two estimates legitimately disagree on camera-ring views of the
+        # back of the head. Never crash de-identification over it — blur MORE,
+        # not less: the union below covers both candidate regions either way.
+        if abs(x3 - x2) >= (s // 20) or abs(y3 - y2) >= (s // 20):
+            log.warning('face detector and pose-landmark head box disagree '
+                        '(|dx|=%d, |dy|=%d, tol=%d px) — pixelating the '
+                        'union of both', abs(x3 - x2), abs(y3 - y2), s // 20)
 
     # Union all boxes.
     x0 = min(b[0] for b in bboxes)
