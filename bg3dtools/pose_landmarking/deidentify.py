@@ -6,6 +6,7 @@ and video frames to protect subject privacy. Supports multiple detection
 backends including MediaPipe and OpenCV Haar cascades.
 """
 
+import logging
 import os
 from statistics import mean
 from typing import Optional, Tuple
@@ -20,6 +21,8 @@ from mediapipe.tasks.python.core.base_options import BaseOptions
 from ..image_tools import normalized_to_pixel_coordinates
 from .resource_paths import face_weights
 from ._delegate import create_detector
+
+log = logging.getLogger(__name__)
 
 # Keep MediaPipe logging quieter (but do not swallow real errors).
 os.environ.setdefault("GLOG_minloglevel", "2")
@@ -278,8 +281,16 @@ def deidentify_face_rgb(
         y2 = (b2[1] + b2[3]) / 2
         x3 = (b3[0] + b3[2]) / 2
         y3 = (b3[1] + b3[3]) / 2
-        assert abs(x3 - x2) < (s // 20), 'face detection and landmark detection do not match'
-        assert abs(y3 - y2) < (s // 20), 'face detection and landmark detection do not match'
+        # assert abs(x3 - x2) < (s // 20), 'face detection and landmark detection do not match'
+        # assert abs(y3 - y2) < (s // 20), 'face detection and landmark detection do not match'
+		
+		# The two estimates legitimately disagree on camera-ring views of the
+		# back of the head. Never crash de-identification over it — blur MORE,
+		# not less: the union below covers both candidate regions either way.
+ 		if abs(x3 - x2) >= (s // 20) or abs(y3 - y2) >= (s // 20):
+			log.warning('face detector and pose-landmark head box disagree '
+						'(|dx|=%d, |dy|=%d, tol=%d px) — pixelating the '
+ 						'union of both', abs(x3 - x2), abs(y3 - y2), s // 20)
 
     # Union all boxes.
     x0 = min(b[0] for b in bboxes)
