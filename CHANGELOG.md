@@ -45,6 +45,18 @@ fact; they were never written at release time.
 
 All three were written independently in a downstream project first.
 
+### Fixed
+
+- **`render.o3d` no longer imports open3d at module load.** open3d's Linux wheel
+  links `libEGL.so.1`/`libGL.so.1`; on a minimal container without them,
+  `import open3d` raises, and because `render/o3d.py` imported it at the top,
+  merely importing a figure module aborted the caller (spinescrews step 02 on a
+  fresh RunPod image). open3d is now imported inside each function, matching
+  `render/scan.py`, so only building an Open3D geometry fails, at call time,
+  where callers' figure guards catch it. The now-dead `ImportError` guard
+  around `.o3d` in `render/__init__.py` is removed. Covered by
+  `test_render_imports_survive_unloadable_open3d`.
+
 ## 1.0.2 — 2026-07-27
 
 The first release in which `pyproject.toml` and `bg3dtools.__version__` actually

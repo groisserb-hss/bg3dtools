@@ -334,3 +334,35 @@ def test_probe_never_mode_skips_probing_entirely(probe_env, monkeypatch):
     monkeypatch.setattr(scan, "_exec_offscreen", lambda *a, **k: [frame])
     imgs = _render_to_images([_full_scene()], _camera(), RenderOptions(width=8, height=8))
     assert imgs == [frame] and probe_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Unloadable open3d: importing the render package must never fail
+# ---------------------------------------------------------------------------
+
+_BLOCKED_OPEN3D_SCRIPT = """
+import sys
+sys.modules['open3d'] = None   # `import open3d` now raises ImportError, like a wheel missing libEGL.so.1
+import numpy as np
+import bg3dtools.render
+from bg3dtools.render.o3d import trisurfsm, anterior_camera
+anterior_camera(np.eye(3))      # pure-NumPy helpers stay usable
+try:
+    trisurfsm(np.eye(3), np.array([[0, 1, 2]]), render=False)
+except ImportError:
+    print('call-time ImportError')
+"""
+
+
+def test_render_imports_survive_unloadable_open3d():
+    """open3d's Linux wheel links libEGL/libGL; on a minimal container without them ``import open3d``
+    raises ImportError. Importing ``bg3dtools.render`` / ``.o3d`` must still succeed, so a caller's
+    figure-module import can't abort a pipeline; only actually building an Open3D geometry fails, at
+    call time, where the caller's figure guard catches it. Runs in a subprocess so blocking open3d
+    can't leak into this process's module cache."""
+    import subprocess
+    import sys
+    out = subprocess.run([sys.executable, "-c", _BLOCKED_OPEN3D_SCRIPT],
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "call-time ImportError"

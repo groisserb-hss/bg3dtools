@@ -75,20 +75,16 @@ __all__ = [
     "run_isolated",
 ]
 
-try:
-    from .o3d import render_mesh_to_image, overhead_camera, anterior_camera
-    __all__.extend([
-        "render_mesh_to_image",
-        "overhead_camera",
-        "anterior_camera",
-    ])
-except ImportError:
-    render_mesh_to_image = None
-    overhead_camera = None
-    anterior_camera = None
+# o3d.py and scan.py both import open3d lazily, so these imports only need numpy — safe without the
+# `viz` extra and on hosts where open3d is installed but can't load (e.g. missing libEGL).
+from .o3d import render_mesh_to_image, overhead_camera, anterior_camera  # noqa: E402
+__all__.extend([
+    "render_mesh_to_image",
+    "overhead_camera",
+    "anterior_camera",
+])
 
-# The unified diagnostic renderer (was humanfit.utils.render). scan.py imports open3d lazily, so this
-# import only needs numpy — safe even without the `viz` extra.
+# The unified diagnostic renderer (was humanfit.utils.render).
 from .scan import (  # noqa: E402
     Wireframe, PointCloudSpec, Skeleton, Floor, CameraFrustum, Mesh, Lines, _RawGeom,
     GeometrySpec, CameraParams, RenderStyle, RenderOptions, render_scan, render_frame,

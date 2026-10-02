@@ -3,17 +3,24 @@ Open3D visualization wrappers.
 
 This module provides convenient functions for visualizing point clouds
 and triangle meshes using the Open3D library.
+
+open3d is imported lazily inside functions (it's the bg3dtools ``viz`` extra, and its Linux wheel
+needs system EGL/GL libraries that minimal containers lack), so importing this module never fails
+on a host where open3d is missing or can't load. Only calling a function here needs it.
 """
+
+from __future__ import annotations
 
 import functools
 import logging
-from typing import Optional, Tuple, List
+from typing import TYPE_CHECKING, Optional, Tuple, List
 
 import numpy as np
-import open3d as o3d
-from open3d.visualization import draw_geometries
 
 from .colors import default_colors, get_heatmap_color
+
+if TYPE_CHECKING:
+    import open3d as o3d
 
 _log = logging.getLogger(__name__)
 
@@ -55,6 +62,8 @@ def get_cam_params_o3d(
     cam_param : o3d.camera.PinholeCameraParameters
         Camera parameters with identity extrinsic.
     """
+    import open3d as o3d
+
     w = w or 1920
     h = h or 1080
     fx = fx or 1000.0
@@ -102,6 +111,8 @@ def scatt(
     pc : o3d.geometry.PointCloud
         Point cloud object.
     """
+    import open3d as o3d
+
     if colors is None:
         colors = [.1, .1, .1]
 
@@ -146,6 +157,8 @@ def scatts(
     show : list of o3d.geometry.PointCloud
         List of point cloud objects.
     """
+    import open3d as o3d
+
     show = []
 
     for ii, pts in enumerate(point_list):
@@ -153,7 +166,7 @@ def scatts(
         show.append(scatt(pts, c, render=False))
 
     if render:
-        draw_geometries(show)
+        o3d.visualization.draw_geometries(show)
     return show
 
 
@@ -194,6 +207,8 @@ def draw_line(
     ls : o3d.geometry.LineSet
         LineSet geometry.
     """
+    import open3d as o3d
+
     p0 = np.asarray(p0, dtype=np.float64).reshape(-1, 3)
     p1 = np.asarray(p1, dtype=np.float64).reshape(-1, 3)
     N = len(p0)
@@ -236,6 +251,8 @@ def _apply_triangle_colors(mesh: o3d.geometry.TriangleMesh,
     Otherwise, "explode" the mesh (duplicate vertices per triangle) and assign
     per-vertex colors so the rendered result is per-face colored.
     """
+    import open3d as o3d
+
     tri_rgb = np.asarray(tri_rgb, dtype=np.float64)
     if tri_rgb.shape[0] != faces.shape[0] or tri_rgb.shape[1] != 3:
         raise ValueError(f"tri_rgb must be (nF,3); got {tri_rgb.shape}")
@@ -298,6 +315,8 @@ def trisurfsm(
     mesh : o3d.geometry.TriangleMesh
         Triangle mesh object.
     """
+    import open3d as o3d
+
     mesh = o3d.geometry.TriangleMesh()
     mesh.vertices = o3d.utility.Vector3dVector(verts)
     mesh.triangles = o3d.utility.Vector3iVector(faces)
@@ -403,6 +422,8 @@ def mesh_to_wireframe(
     wireframe : o3d.geometry.LineSet
         Wireframe representation of the mesh.
     """
+    import open3d as o3d
+
     # Extract all half-edges and deduplicate via sorting + np.unique
     e = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]], axis=0)
     e = np.sort(e, axis=1)
