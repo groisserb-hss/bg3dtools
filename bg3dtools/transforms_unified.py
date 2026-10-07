@@ -1224,8 +1224,9 @@ def quat_multiply(q1: ArrayLike, q2: ArrayLike, bk=None) -> ArrayLike:
     ], axis=-1)
 
 
-# Smooth-norm floor for the swing vector: keeps sqrt differentiable at a zero swing (representable in float32: 1e-12).
-_SWING_NORM_EPS = 1e-6
+# Smooth-norm floor: keeps sqrt differentiable at a zero swing. Its square (1e-24) is still a normal float32, and the
+# bias it adds to the swing angle, ~eps^2 / |swing|^2 relative, stays far below float precision for any real swing.
+_SWING_NORM_EPS = 1e-12
 
 
 def swing_twist_decompose(twist: ArrayLike, axis: ArrayLike, bk=None):
@@ -1259,7 +1260,7 @@ def swing_twist_decompose(twist: ArrayLike, axis: ArrayLike, bk=None):
     if bk is None:
         bk = infer_backend(twist)
     q = twist_to_quat(twist, bk=bk)
-    sign = 2.0 * (q[..., 3:4] >= 0) - 1.0                     # canonical w >= 0 (q and -q are the same rotation)
+    sign = bk.sign(q[..., 3:4]) + (q[..., 3:4] == 0)           # canonical w >= 0 (q and -q are the same rotation); keeps dtype
     xyz, w = q[..., :3] * sign, q[..., 3] * sign[..., 0]
     p = bk.sum(xyz * axis, axis=-1)                            # quaternion vector part along the axis
     angle = 2.0 * bk.arctan2(p, w)
@@ -1268,7 +1269,7 @@ def swing_twist_decompose(twist: ArrayLike, axis: ArrayLike, bk=None):
     tn = bk.sqrt(p * p + w * w + _SWING_NORM_EPS ** 2)
     qt_inv = bk.concatenate([-(p / tn)[..., None] * axis, (w / tn)[..., None]], axis=-1)
     qs = quat_multiply(bk.concatenate([xyz, w[..., None]], axis=-1), qt_inv, bk=bk)
-    ssign = 2.0 * (qs[..., 3:4] >= 0) - 1.0
+    ssign = bk.sign(qs[..., 3:4]) + (qs[..., 3:4] == 0)
     sv, sw = qs[..., :3] * ssign, qs[..., 3] * ssign[..., 0]
     n = bk.sqrt(bk.sum(sv * sv, axis=-1) + _SWING_NORM_EPS ** 2)
     swing = (2.0 * bk.arctan2(n, sw) / n)[..., None] * sv

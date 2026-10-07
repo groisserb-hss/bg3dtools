@@ -1353,6 +1353,12 @@ class TestSwingTwist:
         back = swing_twist_compose(swing, angle, torch.from_numpy(self.AXIS))
         np.testing.assert_allclose(back.numpy(), swing_twist_compose(np_swing, np_angle, self.AXIS), atol=1e-9)
 
+    def test_dtype_preserved(self):
+        rv = _random_rotvecs(10, 17).astype(np.float32)
+        swing, angle = swing_twist_decompose(rv, self.AXIS.astype(np.float32))
+        assert swing.dtype == np.float32 and angle.dtype == np.float32
+        assert swing_twist_compose(swing, angle, self.AXIS.astype(np.float32)).dtype == np.float32
+
     def test_gradients_finite_at_identity(self):
         """Losses evaluate this at rest poses: the gradient must exist there (no arccos / where-branch NaN)."""
         torch = pytest.importorskip("torch")
