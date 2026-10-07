@@ -1,6 +1,6 @@
 """
 Tests for transforms_unified.py — verifying rigid_reg, spherical_to_cartesian,
-cartesian_to_spherical, and quaternion conversions.
+cartesian_to_spherical, quaternion conversions, and the swing-twist decomposition.
 """
 import numpy as np
 import pytest
@@ -31,6 +31,9 @@ from bg3dtools.transforms_unified import (
     average_quaternions,
     average_rotations,
     quat_geodesic_distance,
+    quat_multiply,
+    swing_twist_decompose,
+    swing_twist_compose,
 )
 ATOL = 1e-10
 
@@ -1257,3 +1260,110 @@ class TestRotationAveragingTorch:
         quats = torch.from_numpy(np.stack([q, -q, q, -q]))
         avg = average_quaternions(quats).numpy()
         np.testing.assert_allclose(_canonicalize_quat(avg), _canonicalize_quat(q), atol=1e-9)
+
+
+# ===================================================================
+# Swing-twist decomposition
+# ===================================================================
+
+def _random_rotvecs(n, seed, max_angle=3.0):
+    rng = np.random.default_rng(seed)
+    v = rng.standard_normal((n, 3))
+    return v / np.linalg.norm(v, axis=1, keepdims=True) * rng.uniform(0.0, max_angle, (n, 1))
+
+
+def _unit(v):
+    v = np.asarray(v, dtype=float)
+    return v / np.linalg.norm(v)
+
+
+def _scipy_swing_twist(rotvecs, axis):
+    """Reference: twist = rotation about the axis taken from the quaternion's projection, swing = the rest."""
+    q = ScipyR.from_rotvec(rotvecs).as_quat()
+    q *= np.where(q[:, 3:4] < 0, -1.0, 1.0)
+    p = q[:, :3] @ axis
+    qt = np.c_[p[:, None] * axis, q[:, 3]]
+    qt /= np.linalg.norm(qt, axis=1, keepdims=True)
+    swing = (ScipyR.from_quat(q) * ScipyR.from_quat(qt).inv()).as_rotvec()
+    return swing, 2.0 * np.arctan2(p, q[:, 3])
+
+
+class TestQuatMultiply:
+
+    def test_matches_scipy(self):
+        a, b = ScipyR.random(50, random_state=1), ScipyR.random(50, random_state=2)
+        out, ref = quat_multiply(a.as_quat(), b.as_quat()), (a * b).as_quat()
+        np.testing.assert_allclose(out * np.sign(out[:, 3:]), ref * np.sign(ref[:, 3:]), atol=ATOL)
+
+    def test_torch_parity(self):
+        torch = pytest.importorskip("torch")
+        a, b = ScipyR.random(20, random_state=3).as_quat(), ScipyR.random(20, random_state=4).as_quat()
+        out = quat_multiply(torch.from_numpy(a), torch.from_numpy(b))
+        np.testing.assert_allclose(out.numpy(), quat_multiply(a, b), atol=ATOL)
+
+
+class TestSwingTwist:
+
+    AXIS = _unit([0.3, -0.9, 0.2])
+
+    def test_matches_reference(self):
+        rv = _random_rotvecs(500, 10)
+        swing, angle = swing_twist_decompose(rv, self.AXIS)
+        ref_swing, ref_angle = _scipy_swing_twist(rv, self.AXIS)
+        np.testing.assert_allclose(angle, ref_angle, atol=1e-10)
+        np.testing.assert_allclose(swing, ref_swing, atol=1e-9)
+
+    def test_swing_is_perpendicular_to_axis(self):
+        swing, _ = swing_twist_decompose(_random_rotvecs(500, 11), self.AXIS)
+        np.testing.assert_allclose(swing @ self.AXIS, 0.0, atol=1e-12)
+
+    def test_round_trip(self):
+        rv = _random_rotvecs(500, 12)
+        back = swing_twist_compose(*swing_twist_decompose(rv, self.AXIS), self.AXIS)
+        err = (ScipyR.from_rotvec(back).inv() * ScipyR.from_rotvec(rv)).magnitude()
+        assert err.max() < 1e-10
+
+    def test_pure_twist_and_pure_swing(self):
+        swing, angle = swing_twist_decompose(0.7 * self.AXIS[None], self.AXIS)
+        np.testing.assert_allclose(angle, [0.7], atol=ATOL)
+        np.testing.assert_allclose(swing, 0.0, atol=1e-9)
+        perp = _unit(np.cross(self.AXIS, [1.0, 0.0, 0.0]))
+        swing, angle = swing_twist_decompose(0.9 * perp[None], self.AXIS)
+        np.testing.assert_allclose(angle, [0.0], atol=ATOL)
+        np.testing.assert_allclose(swing, 0.9 * perp[None], atol=1e-9)
+
+    def test_batched_per_row_axes(self):
+        rv = _random_rotvecs(40, 13).reshape(8, 5, 3)
+        axes = np.stack([_unit(a) for a in np.random.default_rng(14).standard_normal((5, 3))])
+        swing, angle = swing_twist_decompose(rv, axes)
+        assert swing.shape == (8, 5, 3) and angle.shape == (8, 5)
+        for k in range(5):
+            ref_swing, ref_angle = _scipy_swing_twist(rv[:, k], axes[k])
+            np.testing.assert_allclose(angle[:, k], ref_angle, atol=1e-10)
+            np.testing.assert_allclose(swing[:, k], ref_swing, atol=1e-9)
+
+    def test_torch_parity(self):
+        torch = pytest.importorskip("torch")
+        rv = _random_rotvecs(200, 15)
+        swing, angle = swing_twist_decompose(torch.from_numpy(rv), torch.from_numpy(self.AXIS))
+        assert isinstance(swing, torch.Tensor)
+        np_swing, np_angle = swing_twist_decompose(rv, self.AXIS)
+        np.testing.assert_allclose(swing.numpy(), np_swing, atol=ATOL)
+        np.testing.assert_allclose(angle.numpy(), np_angle, atol=ATOL)
+        back = swing_twist_compose(swing, angle, torch.from_numpy(self.AXIS))
+        np.testing.assert_allclose(back.numpy(), swing_twist_compose(np_swing, np_angle, self.AXIS), atol=1e-9)
+
+    def test_gradients_finite_at_identity(self):
+        """Losses evaluate this at rest poses: the gradient must exist there (no arccos / where-branch NaN)."""
+        torch = pytest.importorskip("torch")
+        rv = torch.zeros(6, 3, dtype=torch.float64, requires_grad=True)
+        swing, angle = swing_twist_decompose(rv, torch.from_numpy(self.AXIS))
+        (swing.pow(2).sum() + angle.sum() + swing.sum()).backward()
+        assert torch.isfinite(rv.grad).all()
+
+    def test_gradcheck(self):
+        torch = pytest.importorskip("torch")
+        rv = torch.from_numpy(_random_rotvecs(5, 16, max_angle=2.5)).requires_grad_(True)
+        axis = torch.from_numpy(self.AXIS)
+        assert torch.autograd.gradcheck(lambda x: swing_twist_decompose(x, axis), (rv,))
+

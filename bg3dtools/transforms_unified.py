@@ -34,6 +34,7 @@ __all__ = [
     "affine_reg",
     "spherical_to_cartesian", "cartesian_to_spherical",
     "average_quaternions", "average_rotations", "quat_geodesic_distance",
+    "quat_multiply", "swing_twist_decompose", "swing_twist_compose",
 ]
 
 
@@ -1193,3 +1194,109 @@ def quat_geodesic_distance(q1: ArrayLike, q2: ArrayLike, bk=None) -> ArrayLike:
     rz = w1 * z2 - w2 * z1 - (x1 * y2 - y1 * x2)
 
     return 2.0 * bk.arctan2(bk.sqrt(rx * rx + ry * ry + rz * rz), bk.abs(rw))
+
+
+def quat_multiply(q1: ArrayLike, q2: ArrayLike, bk=None) -> ArrayLike:
+    """
+    Hamilton product ``q1 * q2`` (apply q2 first, then q1).
+
+    Parameters
+    ----------
+    q1, q2 : (..., 4) array
+        Quaternions in [x, y, z, w] (scalar-last) format; broadcast together.
+    bk : optional
+        Backend. Inferred from *q1* if None.
+
+    Returns
+    -------
+    q : (..., 4) array
+        The product, [x, y, z, w].
+    """
+    if bk is None:
+        bk = infer_backend(q1)
+    x1, y1, z1, w1 = q1[..., 0], q1[..., 1], q1[..., 2], q1[..., 3]
+    x2, y2, z2, w2 = q2[..., 0], q2[..., 1], q2[..., 2], q2[..., 3]
+    return bk.stack([
+        w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+        w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+        w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+        w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+    ], axis=-1)
+
+
+# Smooth-norm floor for the swing vector: keeps sqrt differentiable at a zero swing (representable in float32: 1e-12).
+_SWING_NORM_EPS = 1e-6
+
+
+def swing_twist_decompose(twist: ArrayLike, axis: ArrayLike, bk=None):
+    """
+    Split rotations into a twist about *axis* and a swing perpendicular to it: ``R = R_swing @ R_twist``.
+
+    The twist is the rotation about *axis* itself (e.g. a bone rolling about its own length); the swing is the
+    rest (where the bone points), a rotation about an axis perpendicular to *axis*.
+
+    Written to be used inside a loss: every step is smooth, including at the identity where most joints sit --
+    the angles come from ``arctan2`` (no ``arccos``, which has an infinite derivative at 1) and the swing vector's
+    norm has a smooth floor, so there is no ``where`` branch for small angles (whose masked branch would turn an
+    infinite derivative into a NaN gradient).
+
+    Parameters
+    ----------
+    twist : (..., 3) array
+        Rotations as axis-angle vectors (direction = axis, length = angle in radians).
+    axis : (..., 3) array
+        Unit twist axes; broadcast against *twist*.
+    bk : optional
+        Backend. Inferred from *twist* if None.
+
+    Returns
+    -------
+    swing : (..., 3) array
+        Swing as an axis-angle vector, perpendicular to *axis*.
+    angle : (...) array
+        Signed twist angle about *axis*, radians, in [-pi, pi].
+    """
+    if bk is None:
+        bk = infer_backend(twist)
+    q = twist_to_quat(twist, bk=bk)
+    sign = 2.0 * (q[..., 3:4] >= 0) - 1.0                     # canonical w >= 0 (q and -q are the same rotation)
+    xyz, w = q[..., :3] * sign, q[..., 3] * sign[..., 0]
+    p = bk.sum(xyz * axis, axis=-1)                            # quaternion vector part along the axis
+    angle = 2.0 * bk.arctan2(p, w)
+    # Twist quaternion (p * axis, w) / norm; its inverse is the conjugate. w >= 0 and the norm is 0 only for a swing
+    # of exactly pi (twist undefined there), so the floor only guards that degenerate case.
+    tn = bk.sqrt(p * p + w * w + _SWING_NORM_EPS ** 2)
+    qt_inv = bk.concatenate([-(p / tn)[..., None] * axis, (w / tn)[..., None]], axis=-1)
+    qs = quat_multiply(bk.concatenate([xyz, w[..., None]], axis=-1), qt_inv, bk=bk)
+    ssign = 2.0 * (qs[..., 3:4] >= 0) - 1.0
+    sv, sw = qs[..., :3] * ssign, qs[..., 3] * ssign[..., 0]
+    n = bk.sqrt(bk.sum(sv * sv, axis=-1) + _SWING_NORM_EPS ** 2)
+    swing = (2.0 * bk.arctan2(n, sw) / n)[..., None] * sv
+    return swing, angle
+
+
+def swing_twist_compose(swing: ArrayLike, angle: ArrayLike, axis: ArrayLike, bk=None) -> ArrayLike:
+    """
+    Inverse of :func:`swing_twist_decompose`: the axis-angle rotation ``R_swing @ R_twist``.
+
+    Parameters
+    ----------
+    swing : (..., 3) array
+        Swing as an axis-angle vector (perpendicular to *axis*).
+    angle : (...) array
+        Twist angle about *axis*, radians.
+    axis : (..., 3) array
+        Unit twist axes; broadcast against *swing*.
+    bk : optional
+        Backend. Inferred from *swing* if None.
+
+    Returns
+    -------
+    twist : (..., 3) array
+        The composed rotation as an axis-angle vector.
+    """
+    if bk is None:
+        bk = infer_backend(swing)
+    tw = angle[..., None] * axis + 0.0 * swing                 # broadcast the twist vector to the batch shape
+    return quat_to_twist(quat_multiply(twist_to_quat(swing, bk=bk), twist_to_quat(tw, bk=bk), bk=bk), bk=bk)
+
