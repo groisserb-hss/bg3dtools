@@ -40,6 +40,7 @@ __all__ = [
     "face_2_vertex_map",
     "edge_triangle_adjacency",
     "surface_sample",
+    "stratified_surface_sample",
     "mesh_volume",
     "ordered_edges",
     "sample_E2V",
@@ -542,6 +543,44 @@ def surface_sample(
         point_map, bc_pt, fidx_pt = point_map[idx], bc_pt[idx], fidx_pt[idx]
 
     return point_map, fidx_pt, bc_pt
+
+
+def stratified_surface_sample(
+    v: np.ndarray, f: np.ndarray, n: int, rng: np.random.Generator,
+    face_weights: Optional[np.ndarray] = None,
+) -> Tuple[csr_matrix, np.ndarray, np.ndarray]:
+    """``n`` points on the surface, their number per face multinomial in face area: a fresh draw from
+    *rng* on every call, uniform within each face, and the same ``(point_map, fidx, bc)`` as
+    :func:`surface_sample` without its voxel dedup (``np.unique`` over hundreds of thousands of rows
+    was the cost of that sampler; the random draw itself is cheap).
+
+    :param v: [nV x 3] vertices of mesh
+    :param f: [nF x 3] facets of mesh
+    :param n: number of points to draw (the exact total returned)
+    :param rng: the generator the draw comes from (seed it for a reproducible sample)
+    :param face_weights: [nF] non-negative multipliers on the face areas (default 1 everywhere) — the
+        hook for a density that follows something other than area, e.g. the scan points each face
+        attracted on the previous iteration of a registration
+    :return point_map: [n x nV] sparse map from mesh vertices to sampled points
+    fidx: [n] index into f for each sampled point
+    bc: [n x 3] barycentric coordinate of each point
+    """
+    from bg3dtools.mesh.barycentric import bc2sparse
+
+    v = np.asarray(v, dtype=np.float64)
+    f = np.asarray(f)
+    area = 0.5 * np.linalg.norm(np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]]), axis=1)
+    p = area if face_weights is None else area * np.asarray(face_weights, dtype=np.float64)
+    total = p.sum()
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError('stratified_surface_sample: every weighted face area is zero')
+    counts = rng.multinomial(int(n), p / total)
+    fidx = np.repeat(np.arange(len(f)), counts)
+    r1, r2 = rng.random((2, len(fidx)))
+    s = np.sqrt(r1)                                   # uniform on the triangle
+    bc = np.column_stack([1.0 - s, s * (1.0 - r2), s * r2])
+    point_map = bc2sparse(f, fidx, bc, nV=len(v)).tocsr()
+    return point_map, fidx, bc
 
 
 def mesh_volume(V: np.ndarray, F: np.ndarray) -> float:

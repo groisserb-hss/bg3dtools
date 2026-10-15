@@ -35,6 +35,7 @@ from .utils import (
     face_2_vertex_map,
     edge_triangle_adjacency,
     surface_sample,
+    stratified_surface_sample,
     mesh_volume,
     ordered_edges,
     internal_edges,
@@ -73,7 +74,9 @@ from .barycentric import (
 
 # Registration
 from .registration import (
+    NRICPResult,
     nonrigid_ICP,
+    stratified_candidate_count,
     discrete_match,
     surface_match,
     transfer_vertex_field,
@@ -140,6 +143,7 @@ __all__ = [
     "face_2_vertex_map",
     "edge_triangle_adjacency",
     "surface_sample",
+    "stratified_surface_sample",
     "mesh_volume",
     "ordered_edges",
     "internal_edges",
@@ -176,7 +180,9 @@ __all__ = [
     "project_to_bccoord",
     "blend_vert_face",
     # Registration
+    "NRICPResult",
     "nonrigid_ICP",
+    "stratified_candidate_count",
     "discrete_match",
     "surface_match",
     "transfer_vertex_field",
