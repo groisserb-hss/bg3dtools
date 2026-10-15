@@ -202,9 +202,20 @@ class ConvergenceScheduler:
         return self._history[-1]
 
     def ratio(self) -> float:
+        """Relative change of the window mean against the previous window's.
+
+        An exact plateau — the two means equal, including both at zero — reads as 0 (converged): the
+        plain quotient would be 0/0 = nan there, and ``nan < thresh`` never holds, so a process whose
+        metric reached exactly zero looped forever when no ``max_iter`` bounded it. A window that just
+        fell to exactly zero reads as inf (not settled yet; the next window decides).
+        """
         w = self._window
         old_avg = np.mean(self._history[-2*w:-w])
         new_avg = np.mean(self._history[-w:])
+        if old_avg == new_avg:
+            return 0.0
+        if new_avg == 0.0:
+            return np.inf
         return np.abs(old_avg - new_avg) / np.abs(new_avg)
 
     @property
