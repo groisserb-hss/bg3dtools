@@ -88,6 +88,11 @@ def save_video(
             writer.close()
 
         from bg3dtools.utils.cifs_wrappers.filesystem import copy_file
+        # Delete-first: copyfile overwrite-opens the destination, and an
+        # overwrite-open of a LIVE file on a bad SMB session can destroy the
+        # target before failing; a vacant name is the safe landing.
+        if os.path.exists(str(video_path)):
+            os.remove(str(video_path))
         copy_file(tmp_path, str(video_path))
     finally:
         if os.path.exists(tmp_path):

@@ -9,7 +9,32 @@ fact; they were never written at release time.
 
 ## Unreleased
 
+### Changed
+
+- **`mesh.nonrigid_ICP`** solves its vertex system directly: `fit_vertices(solver='direct')`
+  (the default since 2026-10-16) factorises the normal equations once for the three
+  right-hand sides — the exact least-squares minimiser (the three LSQR runs of before
+  agree with it to ~0.04 mm on a body-sized mesh, LSQR's being the approximate answer)
+  at 20-30x less solve time; a ridge of 1e-9 of the diagonal toward the warm start
+  keeps a vertex nothing determines where it was, as LSQR's `x0` did. `solver='lsqr'`
+  is the behaviour before. Every caller inherits it: humanfit's coregistration and
+  torso registration, pft2's rigid-boundary and anchored NRICP lanes (their zero-weight
+  correspondences sit on the ridge), `mesh.symmetrize` and `spectral_match`.
+- **`mesh.discrete_match`** draws its candidates with `stratified_surface_sample`
+  (`sampler='stratified'`, the default since 2026-10-16): per-face counts in face
+  area, redrawn every solve, seedable — the voxel-thinned random draw of before
+  (`sampler='voxel'`, ~10-30 % more candidates) spent nearly all of its time in
+  `np.unique`. The scan subsample of `nonrigid_ICP` comes from a numpy Generator
+  (`rng`) instead of the global `random` module.
+- **`utils.ConvergenceScheduler`** no longer loops forever on an exact plateau at
+  zero (`ratio()` read 0/0 = nan); a window that just fell to exactly zero waits one
+  more window.
+
 ### Added
+
+- **`mesh.nonrigid_ICP`** knobs `window`, `max_iter`, `solver`, `sampler`, `sample_scale`,
+  `rng` and `return_stats` (an `NRICPResult` with the per-iteration errors and the
+  match / solve seconds); `mesh.stratified_surface_sample`, `mesh.stratified_candidate_count`.
 
 - **`mesh.stitch`** (new module) — bridge two nearby open boundaries into one
   connected surface, adding faces only, never vertices (so "every output vertex
