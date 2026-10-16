@@ -199,7 +199,7 @@ def test_default_call_returns_the_tuple_and_the_defaults_are_pinned(mesh, scan):
     assert verts.shape == mesh[0].shape and np.isfinite(err)
     params = inspect.signature(nonrigid_ICP).parameters
     assert params['window'].default == 3 and params['max_iter'].default is None
-    assert params['solver'].default == 'lsqr' and params['sampler'].default == 'voxel'
+    assert params['solver'].default == 'direct' and params['sampler'].default == 'stratified'
     assert params['sample_scale'].default == 1.0 and params['rng'].default is None
     assert params['return_stats'].default is False
     assert params['converge_thresh'].default == 0.01 and params['model_weight'].default == 0.2

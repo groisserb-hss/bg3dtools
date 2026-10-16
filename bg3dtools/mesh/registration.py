@@ -86,8 +86,8 @@ def nonrigid_ICP(
     *,
     window: int = 3,
     max_iter: Optional[int] = None,
-    solver: str = 'lsqr',
-    sampler: str = 'voxel',
+    solver: str = 'direct',
+    sampler: str = 'stratified',
     sample_scale: float = 1.0,
     rng: Optional[Union[int, np.random.Generator, np.random.SeedSequence]] = None,
     return_stats: bool = False,
@@ -146,13 +146,14 @@ def nonrigid_ICP(
         against the ``window`` before them, so at least ``2 * window`` iterations run. Default 3.
     max_iter : int, optional
         At most this many vertex solves; None (default) runs until the window converges.
-    solver : {'lsqr', 'direct'}, optional
-        How :func:`fit_vertices` solves the vertex system: three LSQR runs (default) or the normal
-        equations with one sparse factorisation (exact, 20-30x faster on a body-sized mesh).
-    sampler : {'voxel', 'stratified'}, optional
+    solver : {'direct', 'lsqr'}, optional
+        How :func:`fit_vertices` solves the vertex system: the normal equations with one sparse
+        factorisation (default since 2026-10-16: exact, 20-30x faster on a body-sized mesh) or three
+        LSQR runs (``'lsqr'``, the behaviour before).
+    sampler : {'stratified', 'voxel'}, optional
         How :func:`discrete_match` draws the candidate points on the mesh (``discrete=True`` only):
-        a random draw thinned to a voxel grid (default) or an area-stratified draw of the same
-        density without the thinning; both are redrawn every iteration.
+        an area-stratified draw (default since 2026-10-16) or a random draw thinned to a voxel grid
+        (``'voxel'``, the behaviour before, ~10-30 % more candidates); both are redrawn every iteration.
     sample_scale : float, optional
         The stratified sampler's candidate count relative to one per ``1/res``-sided surface cell
         (``res`` as in :func:`discrete_match`); the voxel sampler keeps 10-30 % more. Default 1.
@@ -366,7 +367,7 @@ def discrete_match(
     normal_weight: float = .5,
     radius: float = 1.0,
     *,
-    sampler: str = 'voxel',
+    sampler: str = 'stratified',
     sample_scale: float = 1.0,
     rng: Optional[np.random.Generator] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -398,13 +399,13 @@ def discrete_match(
     radius : float
         The robust radius of the registration this match serves; it scales
         the normal term (see ``normal_weight``).
-    sampler : {'voxel', 'stratified'}
-        ``'voxel'`` (default): ``surface_sample`` draws 9 candidates per query
-        point at random and thins them to one per voxel of side ``1/res``.
-        ``'stratified'``: ``stratified_surface_sample`` draws
-        :func:`stratified_candidate_count` candidates with per-face counts
-        proportional to face area — the same density without the thinning
-        (whose ``np.unique`` was the cost), and seedable through ``rng``.
+    sampler : {'stratified', 'voxel'}
+        ``'stratified'`` (default since 2026-10-16): ``stratified_surface_sample``
+        draws :func:`stratified_candidate_count` candidates with per-face counts
+        proportional to face area, seedable through ``rng``.
+        ``'voxel'`` (the behaviour before): ``surface_sample`` draws 9 candidates
+        per query point at random and thins them to one per voxel of side
+        ``1/res`` — the same density, with a ``np.unique`` that was the cost.
     sample_scale : float
         Multiplier on the stratified candidate count (the voxel sampler keeps
         10-30 % more than one per cell, oblique surfaces cutting more voxels).
@@ -575,7 +576,7 @@ def fit_vertices(
     landmark_targets: Optional[np.ndarray] = None,
     landmark_w: Optional[np.ndarray] = None,
     *,
-    solver: str = 'lsqr',
+    solver: str = 'direct',
 ) -> np.ndarray:
     """
     Fit mesh vertices via weighted least squares.
@@ -611,9 +612,10 @@ def fit_vertices(
         Target 3D landmark positions.
     landmark_w : (nL,) ndarray, optional
         Per-landmark weights.
-    solver : {'lsqr', 'direct'}
-        ``'lsqr'`` (default): three LSQR runs on the same ``A`` (one per coordinate), each started
-        from ``initV`` and stopped at LSQR's default tolerances. ``'direct'``: the normal equations
+    solver : {'direct', 'lsqr'}
+        ``'lsqr'`` (the behaviour before 2026-10-16): three LSQR runs on the same ``A`` (one per
+        coordinate), each started from ``initV`` and stopped at LSQR's default tolerances.
+        ``'direct'`` (default): the normal equations
         ``(AᵀA + λI) x = Aᵀb + λ initV``, one sparse LU factorisation (SuperLU) solving the three
         right-hand sides at once, with ``λ`` a ridge of 1e-9 of the mean diagonal — far below the
         rounding of the solve on every coordinate the data or an edge determines, and the tie-break
