@@ -8,7 +8,7 @@ using imageio as backend.
 import os
 import tempfile
 from collections.abc import Iterable
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 import imageio
 import numpy as np
 
@@ -99,20 +99,25 @@ def save_video(
             os.remove(tmp_path)
 
 
-def load_video(video_path: str) -> List[np.ndarray]:
+def load_video(video_path: str, n_frames: Optional[int] = None) -> List[np.ndarray]:
     """
-    Load all frames from a video file.
+    Load the frames of a video file: all of them, or the first *n_frames*.
 
     Parameters
     ----------
     video_path : str
         Path to video file.
+    n_frames : int, optional
+        Read at most this many frames from the start (e.g. 1 for the frame
+        size without decoding the whole video). None (default) reads all.
 
     Returns
     -------
     frames : list of (H, W, 3) ndarray, uint8
         RGB video frames.
     """
+    if n_frames is not None and n_frames < 1:
+        raise ValueError(f'load_video: n_frames must be >= 1 or None, got {n_frames}')
     reader = imageio.get_reader(str(video_path))
     try:
         # NB: do NOT use `list(reader)` — imageio's ffmpeg reader reports get_length()=inf,
@@ -122,6 +127,8 @@ def load_video(video_path: str) -> List[np.ndarray]:
         frames = []
         for frame in reader:  # RGB uint8
             frames.append(frame)
+            if len(frames) == n_frames:
+                break
     finally:
         reader.close()
     return frames
