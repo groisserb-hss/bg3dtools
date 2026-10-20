@@ -1011,37 +1011,18 @@ def render_scan(
     Backward compatible: the ``width/height/fps/bg_color`` kwargs work exactly as before. Pass a single
     ``options=RenderOptions(...)`` instead to control style (point_size/line_width/bg) in one object.
     """
-    import imageio
-    import tempfile
+    from bg3dtools.image_tools.video import encode_video
+    from bg3dtools.utils.background_io import deliver
     if options is None:
         options = RenderOptions(width=width, height=height, fps=fps,
                                 style=RenderStyle(bg_color=bg_color))
     images = _render_to_images(frames, camera, options)
 
-    # House CIFS pattern (same as image_tools.video.save_video): encode to a
-    # LOCAL temp file — ffmpeg writing straight at a stale network mount
-    # blocks in kernel I/O without raising — then delete the target and copy.
-    # Delete-first matters: copyfile overwrite-opens the destination, and an
-    # overwrite-open of a LIVE file on a bad SMB session can destroy the
-    # target before failing; a vacant name is the safe landing.
+    # The house CIFS pattern (as image_tools.video.save_video): encode to a LOCAL temp file, then
+    # deliver it (delete-first, retried copy; inside a background_io block on its writer thread).
+    # Rendering stays on the calling thread: Open3D's renderers are not for other threads.
     suffix = os.path.splitext(str(vis_file))[1] or '.mp4'
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
-    os.close(fd)
-    try:
-        writer = imageio.get_writer(tmp_path, fps=float(options.fps))
-        try:
-            for im in images:
-                writer.append_data(im)
-        finally:
-            writer.close()
-
-        from bg3dtools.utils.cifs_wrappers.filesystem import copy_file
-        if os.path.exists(str(vis_file)):
-            os.remove(str(vis_file))
-        copy_file(tmp_path, str(vis_file))
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    deliver(encode_video(images, options.fps, suffix=suffix), vis_file)
 
 
 def render_frame(

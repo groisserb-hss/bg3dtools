@@ -56,7 +56,10 @@ def read_triangle_mesh(
         raise FileNotFoundError(f"File not found: {file}")
 
     import trimesh
-    mesh = trimesh.load(file, process=process)
+    # skip_materials: the geometry is all this returns, and an OBJ's material otherwise pulls its
+    # whole texture image (a 3dMD frame's is ~6 MB, as large as the OBJ) through the resolver --
+    # bytes read for nothing, over a network drive. The vertices and faces are the same either way.
+    mesh = trimesh.load(file, process=process, skip_materials=True)
     if isinstance(mesh, trimesh.Scene):
         geometries = list(mesh.geometry.values())
         mesh = geometries[0]
