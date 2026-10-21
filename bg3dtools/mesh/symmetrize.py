@@ -6,7 +6,7 @@ averaging with their mirror reflection.
 """
 
 import numpy as np
-from bg3dtools.mesh.registration import nonrigid_ICP
+from bg3dtools.mesh.registration import equivalent_membrane, nonrigid_ICP
 from bg3dtools.mesh.utils import surface_sample, per_vertex_normals
 from bg3dtools.igl_compat import point_mesh_squared_distance
 
@@ -57,7 +57,9 @@ def symmetrize(
     # register original mesh to flipped surface
     d = point_mesh_squared_distance(verts, sampled, new_f)[0]
     r = 2 * np.percentile(np.sqrt(d), 90)
-    fitted_v = nonrigid_ICP(sampled, faces, verts, pt_normals=new_normals, rad=r)[0]
+    # the stiffness of the Laplace filter (time 5) this call ran with until 2026-10-20, as a membrane
+    fitted_v = nonrigid_ICP(sampled, faces, verts, pt_normals=new_normals, rad=r,
+                            membrane=equivalent_membrane(verts, faces, 5.0))[0]
 
     symm_v = (fitted_v + verts) / 2
 

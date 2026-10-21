@@ -5,13 +5,14 @@ The meshes are subdivided icosahedra on the unit sphere (nonrigid_ICP asserts fa
 plain icosahedron fails that, a once-subdivided one passes). The scan is a noisy ellipsoid, never an exact
 fit, so the convergence ratio never meets 0/0."""
 import inspect
+from pathlib import Path
 
 import numpy as np
 import pytest
 from scipy import sparse
 
 from bg3dtools import igl_compat
-from bg3dtools.mesh import (NRICPResult, discrete_match, fit_vertices, nonrigid_ICP, ordered_edges,
+from bg3dtools.mesh import (NRICPResult, discrete_match, equivalent_membrane, fit_vertices, nonrigid_ICP, ordered_edges,
                             per_face_normals, stratified_candidate_count, stratified_surface_sample,
                             surface_match)
 from bg3dtools.mesh.generate import generate_icosahedron
@@ -244,3 +245,150 @@ def test_stratified_run_is_reproducible_from_a_seed(mesh, scan):
 def test_rejects_bad_knobs(mesh, scan, bad):
     with pytest.raises(ValueError):
         _run(mesh, scan, **bad)
+
+
+# ---------------------------------------------------------------------------
+# The membrane in the solve (2026-10-20): no post-solve filter, the result the last solve
+# ---------------------------------------------------------------------------
+
+GOLDEN = Path(__file__).parent / 'data' / 'nricp_smoothing_golden.npz'     # the code before the change
+
+
+def test_no_membrane_reproduces_the_old_smooth_false(mesh, scan):
+    """Without a membrane the loop is the old one without its filter (smooth=False), to the bit."""
+    with np.load(GOLDEN) as z:
+        old = z['nosmooth']
+    np.testing.assert_allclose(_run(mesh, scan, rng=7)[0], old, atol=1e-10)
+
+
+def test_the_membrane_default_is_pinned():
+    params = inspect.signature(nonrigid_ICP).parameters
+    assert params['membrane'].default is None
+    assert 'smooth' not in params and 'smoothing' not in params
+
+
+def _dense_membrane_solve(sys_, reg_op, reg_target):
+    """The same energy built row by row, densely, per coordinate, and solved by lstsq: an independent reference."""
+    v, f, fidx, bc = sys_['modelV'], sys_['faces'], sys_['fidx'], sys_['bc']
+    pts, sw, edges, ew = sys_['scanpts'], sys_['scan_w'], sys_['edges'], sys_['edge_w']
+    nV = len(v)
+    B = np.zeros((len(pts), nV))
+    for s_ in range(len(pts)):
+        np.add.at(B[s_], f[fidx[s_]], bc[s_])
+    E = np.zeros((len(edges), nV))
+    E[np.arange(len(edges)), edges[:, 0]], E[np.arange(len(edges)), edges[:, 1]] = ew, -ew
+    root = np.linalg.cholesky(reg_op.toarray() + 1e-12 * np.eye(nV)).T     # reg_op = root' root
+    A = np.vstack([sw[:, None] * B, E, root])
+    out = np.empty_like(v)
+    for c in range(3):
+        b = np.concatenate([sw * pts[:, c], ew * (v[edges[:, 0], c] - v[edges[:, 1], c]), root @ reg_target[:, c]])
+        out[:, c] = np.linalg.lstsq(A, b, rcond=None)[0]
+    return out
+
+
+def test_the_membrane_solve_is_the_least_squares_minimiser(mesh, scan):
+    from bg3dtools.mesh.laplace import cotangent_weights
+    sys_ = _system(mesh, scan, landmarks=False)
+    v, f = mesh
+    reg_op = (-1e-5 * sparse.csr_matrix(-cotangent_weights(v, f))).tocsr()
+    target = 1.01 * v
+    got = fit_vertices(**sys_, reg_op=reg_op, reg_target=target)
+    np.testing.assert_allclose(got, _dense_membrane_solve(sys_, reg_op, target), atol=1e-6)
+
+
+def _bump_scan(v, f, n_points, width, amplitude=0.005, seed=0):
+    """Points on the sphere of *v* with a Gaussian radial bump of *width* (m) on top, and radial normals."""
+    rng = np.random.default_rng(seed)
+    pmap, _, _ = stratified_surface_sample(v, f, n_points, rng)
+    pts = pmap @ v
+    radius = np.linalg.norm(v, axis=1).mean()
+    pts = radius * pts / np.linalg.norm(pts, axis=1, keepdims=True)
+    top = np.array([0.0, 0.0, radius])
+    unit = pts / radius
+    pts = pts + amplitude * np.exp(-0.5 * (np.linalg.norm(pts - top, axis=1) / width) ** 2)[:, None] * unit
+    return pts, unit
+
+
+def _bump_fitted(v, f, n_points, width, membrane, amplitude=0.005):
+    """How much of the bump's height the fit takes up at its peak (the top vertex)."""
+    pts, normals = _bump_scan(v, f, n_points, width, amplitude)
+    out, _ = nonrigid_ICP(pts, f, v, pt_normals=normals, membrane=membrane, rad=0.05, model_weight=0.01,
+                          max_iter=8, converge_thresh=0.0, rng=1)
+    top = int(np.argmax(v[:, 2]))
+    return (np.linalg.norm(out[top]) - np.linalg.norm(v[top])) / amplitude
+
+
+@pytest.fixture(scope='module')
+def fine_sphere():
+    v, f = _icosphere(4)
+    return 0.15 * v, f                                # a 15 cm sphere: ~8 mm edges
+
+
+def test_a_membrane_keeps_broad_offsets_and_damps_fine_ones(fine_sphere):
+    v, f = fine_sphere
+    assert _bump_fitted(v, f, 20000, 0.06, 0.01) > 0.9
+    fine = _bump_fitted(v, f, 20000, 0.008, 0.01)
+    assert fine < 0.5
+    assert _bump_fitted(v, f, 20000, 0.008, None) > fine + 0.3
+
+
+def test_the_membrane_does_not_depend_on_the_scan_density(fine_sphere):
+    """The membrane's weight follows the data's weight per area, so a sparser scan is held the same."""
+    v, f = fine_sphere
+    assert abs(_bump_fitted(v, f, 5000, 0.025, 0.01) - _bump_fitted(v, f, 20000, 0.025, 0.01)) < 0.05
+
+
+def test_a_membrane_resists_a_slide(mesh):
+    """Matches held while the scan points turn along the sphere drag the vertices along it -- a rotation of the
+    displacement field, which costs the data the same wherever the surface is not pinned. The membrane
+    charges its gradient and holds it, the more the wider (weights as nonrigid_ICP sets them: width^2
+    times the data's nominal weight per area)."""
+    from bg3dtools.mesh.laplace import cotangent_weights
+    v, f = mesh
+    rng = np.random.default_rng(3)
+    pmap, fidx, bc = stratified_surface_sample(v, f, 3000, rng)
+    on = pmap @ v
+    on /= np.linalg.norm(on, axis=1, keepdims=True)
+    a = 0.1
+    turn = np.array([[np.cos(a), -np.sin(a), 0.0], [np.sin(a), np.cos(a), 0.0], [0.0, 0.0, 1.0]])
+    edges = ordered_edges(f)
+    K = 3 * len(f)
+    L = sparse.csr_matrix(-cotangent_weights(v, f))
+    rho = len(on) / (K * K * igl_compat.massmatrix(v, f).diagonal().sum())
+    common = dict(initV=v, faces=f, modelV=v, fidx=fidx, bc=bc, scanpts=on @ turn.T, edges=edges,
+                  scan_w=np.full(len(on), 1.0 / K), edge_w=np.full(len(edges), 0.01 / len(edges)))
+    drift = [np.linalg.norm(fit_vertices(**common) - v, axis=1).mean()]
+    for width in (0.3, 1.0):                          # on a unit sphere
+        op = (-(width ** 2) * rho * L).tocsr()
+        drift.append(np.linalg.norm(fit_vertices(**common, reg_op=op, reg_target=v) - v, axis=1).mean())
+    assert drift[0] > drift[1] > drift[2]
+    assert drift[2] < 0.5 * drift[0]
+
+
+@pytest.mark.parametrize('bad', [dict(membrane=0.0), dict(membrane=-0.01), dict(membrane=0.01, solver='lsqr')])
+def test_the_membrane_rejects_bad_settings(mesh, scan, bad):
+    with pytest.raises(ValueError):
+        _run(mesh, scan, **bad)
+
+
+def test_the_equivalent_membrane_is_as_stiff_as_the_old_filter(fine_sphere):
+    """The Laplace filter the membrane replaced, (I - t L)^-1, and the membrane filter of the equivalent width,
+    (M - w^2 L)^-1 M, take up a smooth bump alike (on a near-uniform mesh, where the mean vertex area is every
+    vertex's)."""
+    from bg3dtools.mesh.laplace import cotangent_weights
+    v, f = fine_sphere
+    L = sparse.csr_matrix(-cotangent_weights(v, f))
+    M = sparse.diags(igl_compat.massmatrix(v, f).diagonal())
+    centre = int(np.argmax(v[:, 2]))
+    bump = np.exp(-0.5 * (np.linalg.norm(v - v[centre], axis=1) / 0.02) ** 2)
+    for t in (1.0, 5.0):
+        width = equivalent_membrane(v, f, t)
+        old = sparse.linalg.spsolve((sparse.eye(len(v)) - t * L).tocsc(), bump)[centre]
+        new = sparse.linalg.spsolve((M - width ** 2 * L).tocsc(), M @ bump)[centre]
+        assert abs(old - new) < 0.05
+
+
+def test_the_equivalent_membrane_is_a_width_in_the_mesh_units(fine_sphere):
+    v, f = fine_sphere
+    assert np.isclose(equivalent_membrane(1000.0 * v, f, 5.0), 1000.0 * equivalent_membrane(v, f, 5.0))
+    assert np.isclose(equivalent_membrane(v, f, 4.0), 2.0 * equivalent_membrane(v, f, 1.0))
