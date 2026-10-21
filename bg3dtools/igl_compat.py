@@ -738,8 +738,10 @@ def massmatrix(v: np.ndarray, f: np.ndarray, type=None):
 
     Notes
     -----
-    Contrary to a long-standing comment in this repo, neither this nor
-    :func:`cotmatrix` returns all zeros on igl 2.5.1. Measured on 2.5.1 and 2.6.1
+    Under numpy 2, libigl 2.5.1 returns EMPTY sparse matrices from this and
+    :func:`cotmatrix` (no error; seen 2026-10-20: numpy 2.2.6, the screws310 env), so
+    an env pairing them is broken for every sparse-returning call. Under numpy 1,
+    neither returns all zeros on igl 2.5.1. Measured on 2.5.1 and 2.6.1
     across planar, closed, non-manifold, zero-area and int32/float32 inputs: the
     Voronoi diagonal sums to exactly the surface area, and ``cotmatrix`` matches
     ``mesh.laplace.cotangent_weights`` up to sign. The hand-rolled

@@ -75,6 +75,7 @@ from .barycentric import (
 # Registration
 from .registration import (
     NRICPResult,
+    equivalent_membrane,
     nonrigid_ICP,
     stratified_candidate_count,
     discrete_match,
@@ -181,6 +182,7 @@ __all__ = [
     "blend_vert_face",
     # Registration
     "NRICPResult",
+    "equivalent_membrane",
     "nonrigid_ICP",
     "stratified_candidate_count",
     "discrete_match",

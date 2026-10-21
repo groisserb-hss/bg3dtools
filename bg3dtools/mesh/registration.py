@@ -64,13 +64,29 @@ class NRICPResult:
     total_s: float
 
 
+def _surface_area(verts: np.ndarray, faces: np.ndarray) -> float:
+    """The mesh's total area -- the sum of its lumped vertex areas, Voronoi or barycentric alike."""
+    v = np.asarray(verts, np.float64)
+    e1, e2 = v[faces[:, 1]] - v[faces[:, 0]], v[faces[:, 2]] - v[faces[:, 0]]
+    return float(0.5 * np.linalg.norm(np.cross(e1, e2), axis=1).sum())
+
+
+def equivalent_membrane(verts: np.ndarray, faces: np.ndarray, time: float) -> float:
+    """The :func:`nonrigid_ICP` membrane width (in the mesh's units) as stiff as the post-solve Laplace filter
+    ``(I - time * L)^-1`` it replaced on 2026-10-20 (``L`` the cotangent Laplacian, unnormalised, so *time* is in
+    mesh rings): that filter is the minimiser of ``|d - d0|^2 + time * d' (-L) d``, a membrane of width^2 =
+    ``time`` times the vertex area against data of unit weight per vertex, so the width is
+    ``sqrt(time * mean vertex area)``, the mean being the surface area over the vertex count. For a caller
+    migrating from a filter time it had no data to tune: on STAR (m) time 1, 4, 5 give about 16, 32, 36 mm."""
+    return float(np.sqrt(time * _surface_area(verts, faces) / len(verts)))
+
+
 def nonrigid_ICP(
     points: np.ndarray,
     faces: np.ndarray,
     modelV: np.ndarray,
     initV: Optional[np.ndarray] = None,
     pt_normals: Optional[np.ndarray] = None,
-    smooth: bool = True,
     converge_thresh: float = 0.01,
     rad: float = 0.05,
     model_weight: float = 0.2,
@@ -91,6 +107,7 @@ def nonrigid_ICP(
     sample_scale: float = 1.0,
     rng: Optional[Union[int, np.random.Generator, np.random.SeedSequence]] = None,
     return_stats: bool = False,
+    membrane: Optional[float] = None,
 ) -> Union[Tuple[np.ndarray, float], NRICPResult]:
     """
     Non-rigid ICP registration of a point cloud to a template mesh.
@@ -110,8 +127,21 @@ def nonrigid_ICP(
         Initial vertex positions. Default is modelV.
     pt_normals : (nS, 3) ndarray, optional
         Surface normals for the point cloud. Required if discrete=True.
-    smooth : bool, optional
-        If True, apply Laplacian smoothing each iteration. Default is True.
+    membrane : float, optional
+        A membrane term in each solve's energy, ``lam * d' (-L) d`` on the displacement ``d`` from the model
+        (the squared gradient of the displacement, integrated; ``L`` the model's cotangent Laplacian), with
+        ``lam = membrane^2 * rho`` and ``rho`` the data term's nominal weight per unit area (the subsample's
+        points at weight ``1/K`` each, over the model's area). *membrane* is a physical width IN THE MESH'S
+        UNITS (m for a body model, mm for a mesh in mm): a fully observed offset at wavenumber k is fitted by
+        ``1 / (1 + membrane^2 k^2)``, so offsets much wider than it (a rib hump) are taken up and jags much
+        narrower are not. Every iterate -- the result too -- minimises data + edges + membrane: there is no
+        smoothing between the solves, and the result is the last solve. The membrane charges any gradient of
+        the displacement, a rotation or shear of the registration against the model too, so it holds vertices
+        the scan cannot pin (a slide around a skull under hair; the edge term's targets follow such
+        rotations). Where the data is weak (holes, matches far off under the robust kernel) it takes over.
+        None (default): edges only. Needs ``solver='direct'``. Until 2026-10-20 the regularisation was a
+        Laplace filter applied after each solve and to the result (time ``clip(1 / model_weight, 1, 100)``,
+        ``smooth=True``); :func:`equivalent_membrane` converts such a time to a width.
     converge_thresh : float, optional
         Relative change of the windowed RMS error below which the iteration stops. Default is 0.01.
     rad : float, optional
@@ -188,6 +218,10 @@ def nonrigid_ICP(
         raise ValueError(f'window must be >= 1, got {window}')
     if max_iter is not None and max_iter < 1:
         raise ValueError(f'max_iter must be >= 1 or None, got {max_iter}')
+    if membrane is not None and not membrane > 0:
+        raise ValueError(f'membrane must be a width > 0 or None, got {membrane}')
+    if membrane is not None and solver != 'direct':
+        raise ValueError(f"membrane needs solver='direct', got {solver!r}")
     rng = np.random.default_rng(rng)
     assert len(faces) > 1.8 * len(modelV)
     faces = faces.astype(np.int32)
@@ -242,8 +276,9 @@ def nonrigid_ICP(
 
     # Cotangent Laplacian on the undeformed model (fixed throughout).
     # Negated: cotangent_weights uses the opposite sign convention, so this equals
-    # igl_compat.cotmatrix (to 1e-15). An older comment claimed igl's version returns
-    # all zeros on 2.5.1; not reproducible -- see igl_compat.massmatrix's Notes.
+    # igl_compat.cotmatrix (to 1e-15) where that works: libigl 2.5.1 under numpy 2 returns
+    # EMPTY sparse matrices (cotmatrix, massmatrix; seen 2026-10-20 in the screws310 env), so
+    # nothing here takes a sparse matrix from igl -- see igl_compat.massmatrix's Notes.
     model_cot_L = csr_matrix(-cotangent_weights(modelV, faces))
 
     # Implicit smoothing for edge targets: (I - t*L) @ smooth = disp.
@@ -252,9 +287,11 @@ def nonrigid_ICP(
     nV = modelV.shape[0]
     # heavy-duty smoothing for edge weights
     heavy_smooth = factorized((sparse.eye(nV) - 1000 * model_cot_L).tocsc())
-    if smooth:
-        light_t = np.clip((1 / model_weight), 1.0, 100.)
-        light_smooth = factorized((sparse.eye(nV) - light_t * model_cot_L).tocsc())
+    # The membrane per scan point of the subsample: each point weighs 1/K^2 nominally, so the data's weight per
+    # area is n / (K^2 * area) and the membrane's weight membrane^2 times that.
+    membrane_unit = None
+    if membrane is not None:
+        membrane_unit = (-membrane ** 2 / (K * K * _surface_area(modelV, faces)) * model_cot_L).tocsr()
 
     assert 0 < step_size <= 1.0, 'Step size must be bewtween 0 and 1'
 
@@ -323,16 +360,10 @@ def nonrigid_ICP(
         solve_t = time.perf_counter()
         newV = fit_vertices(fittedV, faces, smoothV, fidx, bc, subscan, edges, scan_w, edge_weight,
                             landmark_regressor=lm_regressor, landmark_targets=lm_targets, landmark_w=lm_w,
-                            solver=solver)
+                            solver=solver, reg_op=None if membrane_unit is None else len(subscan) * membrane_unit,
+                            reg_target=modelV)
         solve_s.append(time.perf_counter() - solve_t)
         fittedV = step_size * newV + (1 - step_size) * fittedV
-
-        # Smooth the deformation from modelV (preserves volume — fingers
-        # don't shrink); uniform rotations (arm pose change) are left alone.
-        if smooth and reg_converge.steps > 0:
-            disp = fittedV - modelV
-            smooth_disp = np.column_stack([light_smooth(disp[:, i]) for i in range(3)])
-            fittedV = modelV + smooth_disp
 
         iter_s.append(time.perf_counter() - step_t)
         errors.append(err)
@@ -577,6 +608,8 @@ def fit_vertices(
     landmark_w: Optional[np.ndarray] = None,
     *,
     solver: str = 'direct',
+    reg_op: Optional[sparse.spmatrix] = None,
+    reg_target: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Fit mesh vertices via weighted least squares.
@@ -623,6 +656,12 @@ def fit_vertices(
         such a vertex stays at ``initV``, which is what LSQR's warm start does there. The exact
         least-squares minimiser otherwise (the two agree to ~0.01-0.04 mm on a body-sized mesh, LSQR
         being the approximate one) at 20-30x less time.
+    reg_op : (nV, nV) sparse matrix, optional
+        A quadratic term ``(V - reg_target)' reg_op (V - reg_target)`` per coordinate, added to the normal
+        equations (:func:`nonrigid_ICP`'s membrane: the weighted ``-L``).
+        Direct solver only.
+    reg_target : (nV, 3) ndarray, optional
+        What *reg_op* measures the displacement from (required with it).
 
     Returns
     -------
@@ -636,6 +675,10 @@ def fit_vertices(
     """
     if solver not in _SOLVERS:
         raise ValueError(f"solver must be one of {_SOLVERS}, got {solver!r}")
+    if reg_op is not None and solver != 'direct':
+        raise ValueError(f"reg_op needs solver='direct', got {solver!r}")
+    if reg_op is not None and reg_target is None:
+        raise ValueError('reg_op needs reg_target')
 
     nS = scanpts.shape[0]
     nV = modelV.shape[0]
@@ -685,8 +728,12 @@ def fit_vertices(
             # kept between calls. The ridge toward initV decides only the coordinates nothing else
             # determines (see the docstring); it is 1e-9 of the diagonal everywhere else.
             AtA = (A.T @ A).tocsc()
+            Atb = A.T @ b
+            if reg_op is not None:
+                AtA = (AtA + reg_op).tocsc()
+                Atb = Atb + reg_op @ reg_target
             lam = 1e-9 * AtA.diagonal().mean()
-            fittedV = splu((AtA + lam * sparse.eye(nV, format='csc')).tocsc()).solve(A.T @ b + lam * initV)
+            fittedV = splu((AtA + lam * sparse.eye(nV, format='csc')).tocsc()).solve(Atb + lam * initV)
         assert np.all(np.isfinite(fittedV))
     except Exception as e:
         np.savez('/tmp/crashdump.npz', initV=initV, faces=faces, modelV=modelV,

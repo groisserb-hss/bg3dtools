@@ -18,7 +18,7 @@ from bg3dtools.mesh.modify import resize_to_num_verts
 from bg3dtools.mesh.utils import mesh_volume
 from bg3dtools.mesh.barycentric import bc2sparse, project_to_bccoord
 from bg3dtools.mesh.utils import surface_sample, per_vertex_normals, per_vertex_smoothing
-from bg3dtools.mesh.registration import affine_ICP, nonrigid_ICP
+from bg3dtools.mesh.registration import affine_ICP, equivalent_membrane, nonrigid_ICP
 
 from spectral_match.correspondence.product_manifold_filters import product_manifold_filter as pmf
 from spectral_match.tools.mesh_class import Mesh
@@ -50,7 +50,9 @@ def pmf_match(src_hr, dst_orig, config, src=None, dst=None):
     map = surface_sample(src.v, src.f, N=30000)[0]
     p = map @ src.v
     n = map @ per_vertex_normals(src.v, src.f)
-    aligned_v = nonrigid_ICP(p, dst.f, aligned_v, pt_normals=n, model_weight=3.)[0]
+    # the stiffness of the Laplace filter (time 1) this call ran with until 2026-10-20, as a membrane
+    aligned_v = nonrigid_ICP(p, dst.f, aligned_v, pt_normals=n, model_weight=3.,
+                             membrane=equivalent_membrane(aligned_v, dst.f, 1.0))[0]
     t1 = time()
     _log.info('pmf_match: ICP init %.2fs (src %d, dst %d verts)', t1 - t0, len(src.v), len(dst.v))
 
