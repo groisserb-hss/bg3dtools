@@ -153,6 +153,7 @@ from bg3dtools.pytorch import TorchBackend, infer_backend  # if torch installed
 | `render/` | Colors/colormaps; visualization via `render.trimesh` or `render.o3d`; `run_isolated()` subprocess wrapper |
 | `utils/` | Timing, algorithms (FPS, PCA), filesystem, stats |
 | `utils/cifs_wrappers/` | Network filesystem I/O with exponential backoff retry |
+| `utils/background_io.py` | Write-behind and read-ahead for network-drive work: `background_io()` block (ONE writer thread, jobs run first-in first-out, a failure stops it and reaches the submitter unchanged, jobs deep-copied at submit, bounded queue), `writer()` (immediate outside a block), `prefetch()` (ordered read-ahead), `deliver()` (delete-first copy of a locally encoded file; every video writer ends with it) |
 | `transforms_unified.py` | Rotation/affine transforms (twist/quaternion/matrix) |
 | `igl_compat.py` | libigl version-compatibility wrappers — the only module that imports `igl` |
 

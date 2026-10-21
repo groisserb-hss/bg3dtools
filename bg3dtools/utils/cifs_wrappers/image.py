@@ -69,37 +69,22 @@ def save_image(path, image):
 
 
 def save_video(path, array, fps=30, codec='libx264', format='mp4'):
-    """Encode to a local temp file, then copy to *path* with retry.
+    """Encode to a local temp file, then deliver it to *path* (delete-first, retried copy).
 
     ffmpeg writing directly to a stale network mount blocks in kernel I/O
     without raising, which no retry decorator can catch; only the final
-    ``copy_file`` touches the network (and carries its own retry).
+    copy touches the network (and carries its own retry). Same path as
+    ``bg3dtools.image_tools.video.save_video``: ``encode_video`` +
+    ``background_io.deliver``.
     """
     import os
-    import tempfile
-    import imageio.v2 as imageio
-
-    from .filesystem import copy_file
+    from bg3dtools.image_tools.video import encode_video
+    from bg3dtools.utils.background_io import deliver
 
     log = logging.getLogger(__name__)
     suffix = os.path.splitext(str(path))[1] or ('.%s' % format)
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
-    os.close(fd)
-    # mkstemp creates 0600. Now that copy_file uses copyfile (not copy2), the
-    # destination is created by open(dst,'wb') and picks up 0o666 & ~umask on its
-    # own, so this chmod no longer affects the result -- it is kept only so the
-    # temp file itself isn't 0600 while it's being written.
-    umask = os.umask(0)
-    os.umask(umask)
-    os.chmod(tmp_path, 0o666 & ~umask)
     try:
-        with imageio.get_writer(tmp_path, fps=fps, codec=codec, format=format) as writer:
-            for frame in array:
-                writer.append_data(frame)
-        copy_file(tmp_path, path)
-    except Exception as e:
+        deliver(encode_video(array, fps, suffix=suffix, codec=codec, format=format), path)
+    except Exception:
         log.error('Failed to save %s' % path)
         raise
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)

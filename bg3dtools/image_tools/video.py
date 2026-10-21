@@ -38,6 +38,39 @@ def vreader(path: str) -> Iterator[np.ndarray]:
         yield frame
 
 
+def encode_video(rgb_frames: Iterable[np.ndarray], fps: float, suffix: str = '.mp4',
+                 **writer_kwargs) -> str:
+    """
+    Encode frames to a new LOCAL temporary file and return its path; the caller owns the file.
+
+    Local on purpose: ffmpeg writing straight at a stale network mount blocks in kernel I/O without
+    raising (imageio then waits for it forever). ``bg3dtools.utils.background_io.deliver`` moves the
+    finished file to its destination in Python, where the copy is retried -- and, inside a
+    ``background_io`` block, off the calling thread.
+
+    Parameters
+    ----------
+    rgb_frames : iterable of (H, W, 3) uint8 ndarray
+        RGB frames.
+    fps : float
+        Frames per second.
+    suffix : str
+        The temporary file's extension (it picks the container).
+    **writer_kwargs
+        Passed to ``imageio.get_writer`` (e.g. ``codec``, ``format``).
+    """
+    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    try:
+        with imageio.get_writer(tmp_path, fps=float(fps), **writer_kwargs) as writer:
+            for frame in rgb_frames:
+                writer.append_data(frame)
+    except BaseException:
+        os.remove(tmp_path)
+        raise
+    return tmp_path
+
+
 def save_video(
     video_path: str,
     rgb_data: Iterable[np.ndarray],
@@ -57,46 +90,19 @@ def save_video(
 
     Notes
     -----
-    Encodes to a local temporary file, then copies to *video_path*. ffmpeg
-    writing directly to a stale network mount blocks in kernel I/O without
-    raising (imageio waits forever for it to exit); encoding locally keeps
-    the network I/O in Python where ``copy_file`` can retry it.
+    Encodes to a local temporary file (``encode_video``), then delivers it to *video_path*
+    (``background_io.deliver``: delete-first, retried copy) -- inside a ``background_io`` block on the
+    block's writer thread, after everything the block queued before it.
     """
+    from bg3dtools.utils.background_io import deliver
+
+    rgb_data = list(rgb_data)
+    if max(f.max() for f in rgb_data) <= 1.0:
+        rgb_data = [255*f for f in rgb_data]
+    # Expect RGB uint8; convert if needed
+    frames = (fr.astype(np.uint8, copy=False) for fr in rgb_data)
     suffix = os.path.splitext(str(video_path))[1] or '.mp4'
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
-    os.close(fd)
-    # mkstemp creates 0600. Now that copy_file uses copyfile (not copy2), the
-    # destination is created by open(dst,'wb') and picks up 0o666 & ~umask on its
-    # own, so this chmod no longer affects the result -- it is kept only so the
-    # temp file itself isn't 0600 while it's being written.
-    umask = os.umask(0)
-    os.umask(umask)
-    os.chmod(tmp_path, 0o666 & ~umask)
-    try:
-        writer = imageio.get_writer(tmp_path, fps=float(fps))
-        try:
-
-            rgb_data = list(rgb_data)
-            if max(f.max() for f in rgb_data) <= 1.0:
-                rgb_data = [255*f for f in rgb_data]
-
-            for fr in rgb_data:
-                # Expect RGB uint8; convert if needed
-                fr_u8 = fr.astype(np.uint8, copy=False)
-                writer.append_data(fr_u8)
-        finally:
-            writer.close()
-
-        from bg3dtools.utils.cifs_wrappers.filesystem import copy_file
-        # Delete-first: copyfile overwrite-opens the destination, and an
-        # overwrite-open of a LIVE file on a bad SMB session can destroy the
-        # target before failing; a vacant name is the safe landing.
-        if os.path.exists(str(video_path)):
-            os.remove(str(video_path))
-        copy_file(tmp_path, str(video_path))
-    finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+    deliver(encode_video(frames, fps, suffix=suffix), video_path)
 
 
 def load_video(video_path: str, n_frames: Optional[int] = None) -> List[np.ndarray]:
