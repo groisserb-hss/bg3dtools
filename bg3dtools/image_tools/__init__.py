@@ -15,6 +15,7 @@ from .packing import (
 )
 from .interpolation import laplace_interpolation
 from .metrics import dice_score, normalized_cross_correlation, gradient_correlation
+from .color import srgb_to_lab, lab_to_lch, srgb_to_lch, hue_in_window
 
 __all__ = [
     "normal_edges",
@@ -28,4 +29,8 @@ __all__ = [
     "dice_score",
     "normalized_cross_correlation",
     "gradient_correlation",
+    "srgb_to_lab",
+    "lab_to_lch",
+    "srgb_to_lch",
+    "hue_in_window",
 ]

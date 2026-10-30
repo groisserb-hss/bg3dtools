@@ -10,6 +10,7 @@ import numpy as np
 
 __all__ = [
     "sample_texture_at_points",
+    "sample_face_colors",
 ]
 
 
@@ -99,3 +100,24 @@ def sample_texture_at_points(
             colors = img[r, c, None]  # (P, 1)
 
     return colors
+
+
+def sample_face_colors(img: np.ndarray, tc: np.ndarray, ftc: np.ndarray,
+                       interpolation: str = "bilinear") -> np.ndarray:
+    """
+    Texture colour at every face's centroid.
+
+    Parameters
+    ----------
+    img, tc, ftc
+        As for :func:`sample_texture_at_points` (``ftc`` holds one row per face).
+    interpolation : {"bilinear", "nearest"}, optional
+
+    Returns
+    -------
+    colors : (nF, C) ndarray
+        Same dtype as ``img``.
+    """
+    n_faces = len(ftc)
+    return sample_texture_at_points(img, tc, ftc, np.arange(n_faces), np.full((n_faces, 3), 1.0 / 3.0),
+                                    interpolation=interpolation)
