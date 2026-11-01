@@ -30,6 +30,7 @@ __all__ = [
     "extract_manifold_patches",
     "join_meshes",
     "submesh",
+    "faces_absent_from",
     "per_vertex_normals",
     "per_face_normals",
     "adj_from_edges",
@@ -898,3 +899,44 @@ def geodesic_submesh(
     distances = dist[orig_vert_idx]
 
     return sub_verts, sub_faces, orig_face_idx, orig_vert_idx, distances
+
+
+def faces_absent_from(verts_a: np.ndarray, faces_a: np.ndarray, verts_b: np.ndarray, faces_b: np.ndarray,
+                      tol: float) -> np.ndarray:
+    """
+    The faces of mesh A that mesh B does not contain, matched geometrically.
+
+    True for every face of A whose centroid has no centroid of B within ``tol``.
+    Recovers what a cleaning or :func:`submesh` took out of A when the index maps
+    are gone: those operations drop faces but never move a vertex, while
+    ``submesh`` re-sorts the faces it keeps and re-indexes their vertices, so the
+    kept faces of B sit exactly on A's (to the storage precision of B — ``tol``
+    covers that, e.g. 1e-5 m for a float32 PLY in metres) and every other face
+    of A is at least a face's width away.
+
+    Parameters
+    ----------
+    verts_a, faces_a : (Va, D), (Fa, M) ndarray
+        Mesh A, in the same units and frame as B.
+    verts_b, faces_b : (Vb, D), (Fb, M) ndarray
+        Mesh B, a face subset of A (possibly empty).
+    tol : float
+        Centroid match radius, in the meshes' units.
+
+    Returns
+    -------
+    absent : (Fa,) bool ndarray
+        True where A's face is not in B. All True when B has no faces.
+    """
+    from scipy.spatial import cKDTree
+
+    faces_a = np.asarray(faces_a)
+    if len(faces_a) == 0:
+        return np.zeros(0, dtype=bool)
+    faces_b = np.asarray(faces_b)
+    if len(faces_b) == 0:
+        return np.ones(len(faces_a), dtype=bool)
+    cen_a = np.asarray(verts_a, dtype=np.float64)[faces_a].mean(axis=1)
+    cen_b = np.asarray(verts_b, dtype=np.float64)[faces_b].mean(axis=1)
+    dist, _ = cKDTree(cen_b).query(cen_a, distance_upper_bound=float(tol))
+    return ~np.isfinite(dist)
