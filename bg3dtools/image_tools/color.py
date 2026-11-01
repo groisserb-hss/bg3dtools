@@ -7,7 +7,9 @@ relative to the pixel's own brightness, so a near-black pixel's hue is decided b
 -- a dark colour has a small chroma, and a chroma floor removes it from any hue rule honestly.
 
 Conventions: sRGB in [0, 1] (IEC 61966-2-1 transfer function), D65 white, CIE 1976 L*a*b*. Inputs are
-``(..., 3)`` arrays; outputs keep the leading shape.
+``(..., 3)`` arrays; outputs keep the leading shape. A float input is converted in its own dtype (float32 in,
+float32 out — a 30-megapixel texture in float64 would cost 4 x 180 MB of intermediates); anything else is promoted
+to float64.
 """
 
 import numpy as np
@@ -35,20 +37,28 @@ _EPS = 216.0 / 24389.0      # CIE's exact (6/29)^3
 _KAPPA = 24389.0 / 27.0     # CIE's exact (29/3)^3
 
 
+def _as_float(a) -> np.ndarray:
+    """``a`` as a floating array: its own float dtype, else float64."""
+    a = np.asarray(a)
+    return a if a.dtype.kind == "f" else a.astype(np.float64)
+
+
 def srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
     """Undo the sRGB transfer function: gamma-encoded ``rgb`` in [0, 1] -> linear light."""
-    rgb = np.asarray(rgb, dtype=np.float64)
+    rgb = _as_float(rgb)
     return np.where(rgb <= 0.04045, rgb / 12.92, ((rgb + 0.055) / 1.055) ** 2.4)
 
 
 def srgb_to_xyz(rgb: np.ndarray) -> np.ndarray:
     """sRGB in [0, 1] -> CIE XYZ (D65, Y of white = 1)."""
-    return srgb_to_linear(rgb) @ _SRGB_TO_XYZ.T
+    lin = srgb_to_linear(rgb)
+    return lin @ _SRGB_TO_XYZ.T.astype(lin.dtype)
 
 
 def xyz_to_lab(xyz: np.ndarray, white: np.ndarray = D65_WHITE) -> np.ndarray:
     """CIE XYZ -> CIELAB ``(L*, a*, b*)``, ``L*`` in [0, 100]."""
-    t = np.asarray(xyz, dtype=np.float64) / white
+    xyz = _as_float(xyz)
+    t = xyz / np.asarray(white, dtype=xyz.dtype)
     f = np.where(t > _EPS, np.cbrt(t), (_KAPPA * t + 16.0) / 116.0)
     return np.stack([116.0 * f[..., 1] - 16.0,
                      500.0 * (f[..., 0] - f[..., 1]),
@@ -57,12 +67,12 @@ def xyz_to_lab(xyz: np.ndarray, white: np.ndarray = D65_WHITE) -> np.ndarray:
 
 def srgb_to_lab(rgb: np.ndarray) -> np.ndarray:
     """sRGB in [0, 1] -> CIELAB (D65). Values outside [0, 1] are clipped first."""
-    return xyz_to_lab(srgb_to_xyz(np.clip(np.asarray(rgb, dtype=np.float64), 0.0, 1.0)))
+    return xyz_to_lab(srgb_to_xyz(np.clip(_as_float(rgb), 0.0, 1.0)))
 
 
 def lab_to_lch(lab: np.ndarray) -> np.ndarray:
     """CIELAB -> ``(L*, C*, h)``: chroma ``C* = |(a*, b*)|`` and hue angle ``h`` in degrees, [0, 360)."""
-    lab = np.asarray(lab, dtype=np.float64)
+    lab = _as_float(lab)
     chroma = np.hypot(lab[..., 1], lab[..., 2])
     hue = np.degrees(np.arctan2(lab[..., 2], lab[..., 1])) % 360.0
     return np.stack([lab[..., 0], chroma, hue], axis=-1)
@@ -76,6 +86,6 @@ def srgb_to_lch(rgb: np.ndarray) -> np.ndarray:
 def hue_in_window(hue_deg: np.ndarray, lo: float, hi: float) -> np.ndarray:
     """True where ``hue_deg`` lies in the closed arc from ``lo`` to ``hi`` going UP (counter-clockwise);
     ``lo > hi`` wraps through 0 (``(340, 20)`` = reds). Angles are taken modulo 360."""
-    h = np.asarray(hue_deg, dtype=np.float64) % 360.0
+    h = _as_float(hue_deg) % 360.0
     lo, hi = float(lo) % 360.0, float(hi) % 360.0
     return ((h >= lo) & (h <= hi)) if lo <= hi else ((h >= lo) | (h <= hi))

@@ -16,6 +16,7 @@ from .packing import (
 from .interpolation import laplace_interpolation
 from .metrics import dice_score, normalized_cross_correlation, gradient_correlation
 from .color import srgb_to_lab, lab_to_lch, srgb_to_lch, hue_in_window
+from .masks import clean_binary_mask
 
 __all__ = [
     "normal_edges",
@@ -33,4 +34,5 @@ __all__ = [
     "lab_to_lch",
     "srgb_to_lch",
     "hue_in_window",
+    "clean_binary_mask",
 ]
