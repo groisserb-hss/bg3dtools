@@ -115,7 +115,7 @@ from .generate import (
 )
 
 # Texture sampling
-from .texture import sample_texture_at_points
+from .texture import sample_face_centroids, sample_texture_at_points
 
 # Flattening / rasterization
 from .flatten import tangent_plane_project, rasterize_mesh_2d, has_flipped_triangles, mds_flatten, lscm_flatten
@@ -155,6 +155,7 @@ __all__ = [
     "geodesic_submesh",
     # Texture sampling
     "sample_texture_at_points",
+    "sample_face_centroids",
     # Flattening / rasterization
     "tangent_plane_project",
     "rasterize_mesh_2d",

@@ -4,7 +4,7 @@ import logging
 
 from ._retry import retry_netfs
 
-__all__ = ["read_mesh", "read_plydata", "write_plydata"]
+__all__ = ["read_mesh", "read_textured_obj", "read_plydata", "write_plydata"]
 
 
 @retry_netfs
@@ -17,6 +17,20 @@ def read_mesh(path, **kwargs):
         result = read_triangle_mesh(str(path), **kwargs)
     except Exception as e:
         log.error('Failed to read mesh %s' % path)
+        raise
+    return result
+
+
+@retry_netfs
+def read_textured_obj(path):
+    """Read a textured OBJ (geometry + texture image) via bg3dtools.mesh.mesh_io.load_textured_obj."""
+    from bg3dtools.mesh.mesh_io import load_textured_obj
+
+    log = logging.getLogger(__name__)
+    try:
+        result = load_textured_obj(str(path))
+    except Exception:
+        log.error('Failed to read textured mesh %s' % path)
         raise
     return result
 

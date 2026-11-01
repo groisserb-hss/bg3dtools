@@ -10,6 +10,7 @@ import numpy as np
 
 __all__ = [
     "sample_texture_at_points",
+    "sample_face_centroids",
 ]
 
 
@@ -99,3 +100,29 @@ def sample_texture_at_points(
             colors = img[r, c, None]  # (P, 1)
 
     return colors
+
+
+def sample_face_centroids(img: np.ndarray, tc: np.ndarray, ftc: np.ndarray,
+                          interpolation: str = "nearest") -> np.ndarray:
+    """
+    An image in texture space sampled at every face's centroid: the texture itself, or any map laid out
+    like it (a bool mask of the texture, a label image) — the UV lookup is the same.
+
+    Parameters
+    ----------
+    img : (H, W[, C]) ndarray
+        Any image in the texture's UV space; its own shape sets the pixel grid, so a reduced copy of the
+        texture is sampled correctly without rescaling the UVs.
+    tc, ftc
+        As for :func:`sample_texture_at_points` (``ftc`` holds one row per face).
+    interpolation : {"nearest", "bilinear"}, optional
+        Nearest by default (the right choice for a mask or labels).
+
+    Returns
+    -------
+    values : (nF, C) ndarray
+        Same dtype as ``img``; a 2-D image gives C = 1.
+    """
+    n_faces = len(ftc)
+    return sample_texture_at_points(img, tc, ftc, np.arange(n_faces), np.full((n_faces, 3), 1.0 / 3.0),
+                                    interpolation=interpolation)
