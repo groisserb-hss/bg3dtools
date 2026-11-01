@@ -52,6 +52,15 @@ resolved) instead of ``hasattr(igl, ...)``::
 
 Calling an unavailable wrapper raises ``RuntimeError`` with remediation advice.
 
+A symbol can also resolve and still be unusable: the pypi ``libigl`` 2.5.1 wheels are
+per-platform compiles of one source, and where the macOS wheel's
+``point_simplex_squared_distance`` only misreads C-order vertices (handled in the
+wrapper), the Linux x86_64 wheel's segfaults the interpreter (2026-11-01). Such cases
+are listed in :data:`BROKEN` (wrapper name -> reason), keyed on the installed
+distribution and platform — the pypi wheel registers a ``libigl`` distribution, a
+conda package does not — and left out of :data:`AVAILABLE`; calling one raises
+``RuntimeError`` with the reason instead of taking the process down.
+
 Testing
 -------
 ``tests/test_igl_compat.py`` pins every contract below and is deliberately
@@ -61,6 +70,7 @@ import-light (numpy + scipy only) so it can run under a bare scratch env::
     ~/opt/anaconda3/envs/igl261/bin/python -m pytest tests/test_igl_compat.py -v
 """
 
+import sys
 from typing import Any, List, Optional, Tuple
 
 import igl
@@ -68,6 +78,7 @@ import numpy as np
 
 __all__ = [
     "AVAILABLE",
+    "BROKEN",
     "MASSMATRIX_TYPE_BARYCENTRIC",
     "MASSMATRIX_TYPE_FULL",
     "MASSMATRIX_TYPE_VORONOI",
@@ -139,6 +150,28 @@ def _missing(wrapper_name: str, *igl_names: str):
         "libigl python binding provides none of %s — install igl 2.5.1 "
         "(conda install -c conda-forge igl=2.5.1)"
         % (wrapper_name, ", ".join(repr(n) for n in igl_names))
+    )
+
+
+def _linux_pypi_wheel() -> bool:
+    """True when ``igl`` is the pypi ``libigl`` wheel (pip's dist-info is present; a conda package registers no
+    ``libigl`` distribution) on Linux — the one build measured to segfault (:data:`BROKEN`)."""
+    from importlib import metadata
+
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        metadata.distribution("libigl")
+    except metadata.PackageNotFoundError:
+        return False
+    return True
+
+
+def _broken(wrapper_name: str):
+    """Raised when a symbol resolved but this build's implementation of it is unusable (:data:`BROKEN`)."""
+    raise RuntimeError(
+        "igl API for %r is unusable on the installed libigl build: %s"
+        % (wrapper_name, BROKEN[wrapper_name])
     )
 
 
@@ -217,9 +250,23 @@ _write_triangle_mesh = _sym("write_triangle_mesh", "write_triangle_mesh")
 if _heat_geodesic is None and None not in (_heat_precompute, _heat_solve, _HeatData):
     _resolved["heat_geodesic"] = "heat_geodesics_precompute+heat_geodesics_solve"
 
-#: Names in ``__all__`` whose underlying igl symbol resolved on this install.
-#: Prefer ``"name" in AVAILABLE`` over ``hasattr(igl, "name")`` at call sites.
-AVAILABLE = frozenset(_resolved)
+#: Wrappers whose igl symbol resolved but whose implementation in THIS build crashes the interpreter, with the
+#: reason. Keyed on the installed distribution and platform, never on a version string (the pypi ``libigl``
+#: 2.5.1 wheels are per-platform compiles of one source: the macOS wheel works, the Linux one does not). A
+#: segfault cannot be caught, so the wrapper refuses the call up front (:func:`_broken`) and the name stays out
+#: of :data:`AVAILABLE`.
+BROKEN = {}
+if _linux_pypi_wheel():
+    BROKEN["point_simplex_squared_distance"] = (
+        "the pypi 'libigl' 2.5.1 Linux x86_64 wheel segfaults inside igl.point_simplex_squared_distance for "
+        "C- and Fortran-order vertex arrays alike beyond a single query (SAR-PC, 2026-11-01), where the macOS "
+        "wheel of the same version only misreads C-order; on Linux install igl 2.5.1 from conda-forge "
+        "(conda install -c conda-forge igl=2.5.1) if this call is needed"
+    )
+
+#: Names in ``__all__`` whose underlying igl symbol resolved on this install AND is usable (not in
+#: :data:`BROKEN`). Prefer ``"name" in AVAILABLE`` over ``hasattr(igl, "name")`` at call sites.
+AVAILABLE = frozenset(n for n in _resolved if n not in BROKEN)
 
 #: Weighting enum for :func:`per_vertex_normals`. An ``int`` in 2.5.1 and a
 #: ``PerVertexNormalsWeightingType`` enum member in 2.6.1 — both accepted by
@@ -883,10 +930,17 @@ def point_simplex_squared_distance(
 
     This is the one place where the layer **changes** 2.5.1's numerical answers
     rather than preserving them — the previous answers were simply wrong. It fixes
-    ``mesh.highD.HighDimMesh``, whose nearest-point search is built on this call.
+    ``mesh.highD.MeshProjector``, whose nearest-point search is built on this call.
+
+    **The pypi ``libigl`` 2.5.1 Linux x86_64 wheel segfaults in this call** (both
+    storage orders, beyond a single query; SAR-PC 2026-11-01 — the column-major note
+    above describes the macOS wheel of the same version), so on that build the wrapper
+    is listed in :data:`BROKEN`, absent from :data:`AVAILABLE`, and raises ``RuntimeError``.
     """
     if _point_simplex_squared_distance is None:
         _missing("point_simplex_squared_distance", "point_simplex_squared_distance")
+    if "point_simplex_squared_distance" in BROKEN:
+        _broken("point_simplex_squared_distance")
     # reshape(-1): a (1, dim) point silently yields a different wrong answer
     out = _point_simplex_squared_distance(
         _flt(p).reshape(-1), np.asfortranarray(v, dtype=np.float64), _idx(ele), int(i)

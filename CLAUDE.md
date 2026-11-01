@@ -213,7 +213,16 @@ conda create -y -n igl261 -c conda-forge python=3.12 igl=2.6.1 numpy scipy pytes
 Functions absent from one binding are skipped there and flagged in `AVAILABLE`: 2.6
 removed `extract_manifold_patches`, `collapse_small_triangles`,
 `resolve_duplicated_faces` and `point_simplex_squared_distance`; 2.5.1 lacks
-`is_vertex_manifold`. `spectral_match/` goes through the layer too.
+`is_vertex_manifold`. `spectral_match/` goes through the layer too. A symbol can resolve
+and still be unusable: the pypi `libigl` 2.5.1 wheels are per-platform compiles of one
+source — the macOS wheel (the Mac env) only misreads C-order in
+`point_simplex_squared_distance`, the Linux x86_64 wheel (the HSS hosts) segfaults in it
+for both storage orders. Such cases live in `igl_compat.BROKEN` (name → reason), keyed
+on the installed distribution and platform (the wheel registers `libigl`, a conda package
+does not), are left out of `AVAILABLE`, and the wrapper raises `RuntimeError` instead of
+crashing; the point-simplex tests skip there.
+Nothing in humanfit or PFT_iphone uses `point_simplex_squared_distance`; its only caller
+is `mesh.highD.MeshProjector`, which has no callers itself.
 
 Note there are now two `read_triangle_mesh` functions: `igl_compat.read_triangle_mesh`
 is libigl's own parser (V/F only), while `mesh.mesh_io.read_triangle_mesh` is the
