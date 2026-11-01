@@ -110,6 +110,47 @@ def test_available_is_a_subset_of_all():
     assert ic.AVAILABLE <= set(ic.__all__)
 
 
+def test_broken_wrappers_are_kept_out_of_available_and_refuse_the_call():
+    """A symbol that resolves but crashes THIS build (``igl_compat.BROKEN``: the pypi libigl 2.5.1 wheel's
+    ``point_simplex_squared_distance``) is absent from AVAILABLE and raises with its reason instead of segfaulting.
+    On a sound build BROKEN is empty and the loop does not run."""
+    assert set(ic.BROKEN) <= set(ic.__all__) and set(ic.BROKEN).isdisjoint(ic.AVAILABLE)
+    for name, reason in ic.BROKEN.items():
+        fn = getattr(ic, name)
+        n_required = sum(p.default is inspect.Parameter.empty for p in inspect.signature(fn).parameters.values())
+        with pytest.raises(RuntimeError, match="unusable on the installed libigl build"):
+            fn(*([None] * n_required))
+        assert reason in str(pytest.raises(RuntimeError, fn, *([None] * n_required)).value)
+
+
+def test_the_linux_pypi_wheel_marks_point_simplex_broken(monkeypatch):
+    """The Linux pypi wheel is told by its ``libigl`` distribution plus the platform; on it
+    ``point_simplex_squared_distance`` is BROKEN, out of AVAILABLE, and refuses the call. Exercised on any build by
+    reloading the layer under a faked distribution lookup and platform, then restored."""
+    import importlib
+    import importlib.metadata as md
+    import sys
+
+    def fake_distribution(name):
+        if name == "libigl":
+            return object()
+        raise md.PackageNotFoundError(name)
+
+    monkeypatch.setattr(md, "distribution", fake_distribution)
+    monkeypatch.setattr(sys, "platform", "linux")
+    try:
+        importlib.reload(ic)
+        assert "point_simplex_squared_distance" in ic.BROKEN
+        assert "point_simplex_squared_distance" not in ic.AVAILABLE
+        with pytest.raises(RuntimeError, match="Linux x86_64 wheel"):
+            ic.point_simplex_squared_distance(np.zeros(3), np.zeros((3, 3)), np.zeros((1, 3), np.int64), 0)
+    finally:
+        monkeypatch.undo()
+        importlib.reload(ic)
+    assert ("point_simplex_squared_distance" in ic.AVAILABLE) == (not ic._linux_pypi_wheel()
+                                                                  and "point_simplex_squared_distance" in ic._resolved)
+
+
 def test_no_version_string_is_ever_parsed():
     """igl.__version__ is absent from the 2.6.1 conda build; the layer must not read it."""
     src = open(ic.__file__).read()
@@ -781,7 +822,7 @@ def test_collapse_small_triangles_leaves_a_healthy_mesh_alone():
 
 
 @pytest.mark.skipif("point_simplex_squared_distance" not in ic.AVAILABLE,
-                    reason="removed in igl 2.6")
+                    reason="removed in igl 2.6, or unusable on this build (igl_compat.BROKEN: the Linux pypi wheel)")
 def test_point_simplex_squared_distance_contract():
     v, f = _quad()
     sqr_d, closest, bc = ic.point_simplex_squared_distance(
@@ -829,7 +870,7 @@ def _ref_closest_point_on_tri(p, a, b, c):
 
 
 @pytest.mark.skipif("point_simplex_squared_distance" not in ic.AVAILABLE,
-                    reason="removed in igl 2.6")
+                    reason="removed in igl 2.6, or unusable on this build (igl_compat.BROKEN: the Linux pypi wheel)")
 def test_point_simplex_squared_distance_matches_an_independent_reference():
     """The wrapper corrects the 2.5.1 binding's column-major misread of ``v``.
 
@@ -858,7 +899,7 @@ def test_point_simplex_squared_distance_matches_an_independent_reference():
 
 
 @pytest.mark.skipif("point_simplex_squared_distance" not in ic.AVAILABLE,
-                    reason="removed in igl 2.6")
+                    reason="removed in igl 2.6, or unusable on this build (igl_compat.BROKEN: the Linux pypi wheel)")
 def test_point_simplex_min_over_faces_matches_point_mesh_squared_distance():
     """The two distance queries must agree — they did not before the storage fix."""
     rng = np.random.RandomState(1)
@@ -872,7 +913,7 @@ def test_point_simplex_min_over_faces_matches_point_mesh_squared_distance():
 
 
 @pytest.mark.skipif("point_simplex_squared_distance" not in ic.AVAILABLE,
-                    reason="removed in igl 2.6")
+                    reason="removed in igl 2.6, or unusable on this build (igl_compat.BROKEN: the Linux pypi wheel)")
 def test_point_simplex_squared_distance_accepts_a_row_vector_point():
     """A (1, dim) query is the same single point as a (dim,) one.
 

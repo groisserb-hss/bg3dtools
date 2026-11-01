@@ -11,6 +11,13 @@ fact; they were never written at release time.
 
 ### Changed
 
+- **`igl_compat.BROKEN`** (2026-11-01): wrappers whose igl symbol resolves but whose
+  implementation in the installed build crashes the interpreter, keyed on the
+  distribution and platform — the pypi `libigl` 2.5.1 Linux x86_64 wheel segfaults
+  inside `point_simplex_squared_distance` for C- and Fortran-order vertices alike,
+  where the macOS wheel of the same version only misreads C-order. Broken names are
+  left out of `AVAILABLE` and the wrapper raises `RuntimeError` with the reason; the
+  point-simplex tests skip on that build.
 - **`mesh.nonrigid_ICP`** solves its vertex system directly: `fit_vertices(solver='direct')`
   (the default since 2026-10-16) factorises the normal equations once for the three
   right-hand sides — the exact least-squares minimiser (the three LSQR runs of before
