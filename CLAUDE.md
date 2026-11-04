@@ -235,6 +235,23 @@ Where a module wraps an igl function under the *same* name (`mesh.laplace.gaussi
 unaliased import binds a name the module's own `def` overwrites, so the wrapper ends up
 calling itself. A test enforces this across both packages.
 
+## Headless Open3D: black frames
+
+On SAR-PC (open3d 0.19, EGL headless, RTX 3090, 2026-11-03) two seated registrations each went on writing every
+3D video all black, without raising, from partway through (one after 89 3D videos, the other after 107) to the end
+of the process; the 2-D videos the same processes wrote stayed normal. The cause was not found. Ruled out: GPU
+memory (a renderer draws with 0.1 GB free), the number of renderers (200 in one process, under the registration's
+imports, all drew), the scene that first came out black (re-rendered in a fresh process, it drew), and NaN, inf or
+empty geometry or a NaN camera (none breaks a later renderer).
+
+So `render.scan._render_to_images` treats a tier that returns only flat images, for a scene that draws something,
+as failed (`_blank`): it is marked dead for the process and the next tier renders, with the fallback warning.
+After such a failure the rest of that process renders with matplotlib, cruder but never black.
+
+Separately, test scripts that built several offscreen renderers in one process segfaulted (on the first video when
+only `render.scan` was imported before rendering; after a few when `bg3dtools.mesh` was imported first), and even
+fresh processes sometimes did. Not seen in a registration, not root-caused.
+
 ## macOS Open3D Rendering Caveat
 
 On macOS, Open3D's `Visualizer` creates Cocoa/OpenGL windows even with `visible=False`. Repeated create/destroy cycles accumulate window-server resources and eventually deadlock the process (low CPU, immune to Ctrl-C). The `OffscreenRenderer` (EGL-based) is not available on macOS.

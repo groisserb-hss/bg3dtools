@@ -17,7 +17,10 @@ tries these tiers in order and returns the first that works:
     diagnostic-only, but always available; runs when both Open3D backends are dead (e.g. headless
     Windows/Linux with no EGL and no display). Needs the ``viz`` extra's matplotlib.
 
-If every tier fails (matplotlib not installed either), ``RenderUnavailable`` is raised.
+If every tier fails (matplotlib not installed either), ``RenderUnavailable`` is raised. A tier that returns
+only blank images (every one a single flat colour) for a scene that draws something has failed too: the
+next tier renders instead, so a renderer that silently stopped drawing never yields a black video
+(``bg3dtools`` CLAUDE.md, "Headless Open3D: black frames").
 
 ``render_mesh_to_image`` (bg3dtools.render.o3d) is a thin wrapper over ``render_frame``, so the two
 render engines that used to exist in parallel are now one implementation. humanfit.utils.render is a
@@ -950,6 +953,17 @@ def _offscreen_crash_probe_ok() -> bool:
 _dead_backends: set = set()
 
 
+def _blank(frames, images) -> bool:
+    """True when the scene draws something (a frame holds a spec) but every image is one flat colour.
+
+    A renderer that has stopped working returns such images without raising (all black, on SAR-PC's
+    headless Open3D). A scene whose geometry is all out of view also draws nothing; it is reported the
+    same way, which costs nothing (that picture shows nothing either)."""
+    if not any(frames):
+        return False
+    return all(np.ptp(np.asarray(im)[..., :3]) == 0 for im in images)
+
+
 def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> List[np.ndarray]:
     """Backend dispatch (the single chokepoint). Tiers, first that works wins:
     offscreen → legacy → matplotlib → RenderUnavailable (macOS starts at legacy).
@@ -959,7 +973,8 @@ def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> L
     diagnostic image. Only if matplotlib is ALSO unavailable do we raise RenderUnavailable, letting
     callers skip images and still produce their data outputs instead of aborting the run.
 
-    A backend that fails once is recorded in ``_dead_backends`` and skipped for the rest of the
+    A backend that returns only blank images (``_blank``) has failed like one that raises. A backend
+    that fails once is recorded in ``_dead_backends`` and skipped for the rest of the
     process, so a dead Open3D backend prints its native error — and this function logs its fallback
     warning — at most once per process rather than on every frame.
 
@@ -983,6 +998,10 @@ def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> L
             log.debug("render backend %s unavailable: %s", backend.__name__, exc)
             errors.append("%s: %s" % (backend.__name__, exc))
             _dead_backends.add(backend.__name__)                         # never re-probe → no repeated native stderr noise
+            continue
+        if _blank(frames, images):                                       # drew nothing: a renderer that stopped drawing
+            errors.append("%s: returned only blank images" % backend.__name__)
+            _dead_backends.add(backend.__name__)
             continue
         if errors:                                                       # a preferred backend failed *this call* → name the tier that ran
             log.warning("render fell back to %s after: %s", backend.__name__, "; ".join(errors))

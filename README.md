@@ -88,6 +88,12 @@ R = twist_to_R(twist)            # [..., 3]    -> [..., 3, 3]
 T = make_aff(twist, trans)       # [..., 3], [..., 3] -> [..., 4, 4]
 ```
 
+## Headless rendering (Linux)
+
+A renderer that returns only flat images for a scene that draws something is treated as failed: the next tier
+(matplotlib) renders instead, with a warning, so a headless Open3D that silently stops drawing never yields a
+black video. See `CLAUDE.md` ("Headless Open3D: black frames").
+
 ## macOS + Open3D
 
 Open3D's `Visualizer` accumulates Cocoa/OpenGL handles across repeated create/destroy cycles and eventually deadlocks the process. For batch rendering, run each call in a spawned subprocess:
