@@ -150,7 +150,7 @@ from bg3dtools.pytorch import TorchBackend, infer_backend  # if torch installed
 | `pose_landmarking/` | MediaPipe pose detection, joint mapping, segmentation |
 | `image_tools/` | Image packing, filters, video I/O |
 | `iphone/` | iOS depth scanning data I/O (Stray Scanner & Record3D) |
-| `render/` | Colors/colormaps; visualization via `render.trimesh` or `render.o3d`; `run_isolated()` subprocess wrapper |
+| `render/` | Colors/colormaps; visualization via `render.trimesh` or `render.o3d`; the unified renderer `render.scan` (`render_scan` / `render_frame`, each call in a fresh child process off macOS: `render._child`); `run_isolated()` subprocess wrapper |
 | `utils/` | Timing, algorithms (FPS, PCA), filesystem, stats |
 | `utils/cifs_wrappers/` | Network filesystem I/O with exponential backoff retry |
 | `utils/background_io.py` | Write-behind and read-ahead for network-drive work: `background_io()` block (ONE writer thread, jobs run first-in first-out, a failure stops it and reaches the submitter unchanged, jobs deep-copied at submit, bounded queue), `writer()` (immediate outside a block), `prefetch()` (ordered read-ahead), `deliver()` (delete-first copy of a locally encoded file; every video writer ends with it) |
@@ -234,6 +234,18 @@ Where a module wraps an igl function under the *same* name (`mesh.laplace.gaussi
 `mesh.utils.per_vertex_normals`, …), import the compat function as `igl_<name>` — an
 unaliased import binds a name the module's own `def` overwrites, so the wrapper ends up
 calling itself. A test enforces this across both packages.
+
+## Headless Open3D: one renderer per process
+
+On Linux, Open3D's headless `OffscreenRenderer` (EGL) does not survive many renderers in one process: on
+SAR-PC (open3d 0.19, 2026-11-04) a process segfaulted in `add_geometry` after four or five, and a seated
+registration that built one per video went on returning black frames after about a hundred, without raising.
+So off macOS `render_scan` and `render_frame` render each call in a fresh child process
+(`bg3dtools.render._child.run_in_child`: a plain subprocess, the job and result as pickle files, the child's
+warnings re-emitted in the parent); a crash there raises `RenderChildDied` for that call only. A tier that
+returns only flat images for a scene with geometry has failed, and the next tier renders instead, so a
+renderer that stopped drawing never yields a black video. The child imports `bg3dtools.mesh` before it
+renders: on SAR-PC, rendering in a process that had imported only `render.scan` segfaulted on its first frame.
 
 ## macOS Open3D Rendering Caveat
 

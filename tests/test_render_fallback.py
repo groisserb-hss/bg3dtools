@@ -53,6 +53,14 @@ def _full_scene():
     ]
 
 
+def _drawn(size):
+    """A stand-in rendered frame that is not blank: white with one dark pixel (an all-flat image counts as
+    a backend that drew nothing, and the dispatcher falls through it)."""
+    img = np.full((size, size, 3), 255, np.uint8)
+    img[0, 0] = 0
+    return img
+
+
 def _background_fraction(img, thresh=250):
     """Fraction of pixels that are (near-)white background — 1.0 means a blank frame."""
     return float(np.mean(np.all(img >= thresh, axis=-1)))
@@ -284,7 +292,7 @@ def test_probe_surfaceless_retry_adopts_env_and_enables_offscreen(probe_env, mon
     """Plain probe dies, surfaceless probe survives → EGL_PLATFORM is adopted for the
     process and the offscreen tier runs in-process."""
     probe_calls = _fake_run_isolated(monkeypatch, [False, True])
-    frame = np.zeros((64, 64, 3), np.uint8)
+    frame = _drawn(64)
     monkeypatch.setattr(scan, "_exec_offscreen", lambda *a, **k: [frame])
 
     imgs = _render_to_images([_full_scene()], _camera(), RenderOptions(width=64, height=64))
@@ -298,7 +306,7 @@ def test_probe_verdict_cached_for_future_processes(probe_env, monkeypatch):
     without spawning any probe child."""
     _fake_run_isolated(monkeypatch, [False, True])
     monkeypatch.setattr(scan, "_exec_offscreen",
-                        lambda *a, **k: [np.zeros((8, 8, 3), np.uint8)])
+                        lambda *a, **k: [_drawn(8)])
     _render_to_images([_full_scene()], _camera(), RenderOptions(width=8, height=8))
 
     cache = scan.json.loads(scan._probe_cache_path().read_text())
@@ -330,7 +338,7 @@ def test_probe_never_mode_skips_probing_entirely(probe_env, monkeypatch):
     """BG3DTOOLS_RENDER_PROBE=never restores pre-probe behavior (caller accepts crash risk)."""
     monkeypatch.setenv("BG3DTOOLS_RENDER_PROBE", "never")
     probe_calls = _fake_run_isolated(monkeypatch, [])
-    frame = np.zeros((8, 8, 3), np.uint8)
+    frame = _drawn(8)
     monkeypatch.setattr(scan, "_exec_offscreen", lambda *a, **k: [frame])
     imgs = _render_to_images([_full_scene()], _camera(), RenderOptions(width=8, height=8))
     assert imgs == [frame] and probe_calls == []

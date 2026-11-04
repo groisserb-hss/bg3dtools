@@ -17,7 +17,14 @@ tries these tiers in order and returns the first that works:
     diagnostic-only, but always available; runs when both Open3D backends are dead (e.g. headless
     Windows/Linux with no EGL and no display). Needs the ``viz`` extra's matplotlib.
 
-If every tier fails (matplotlib not installed either), ``RenderUnavailable`` is raised.
+If every tier fails (matplotlib not installed either), ``RenderUnavailable`` is raised. A tier that returns
+only blank images (every one a single flat colour) for a scene that draws something has failed too: the
+next tier renders instead, so a renderer that silently stopped drawing never yields a black video.
+
+Off macOS every ``render_scan`` / ``render_frame`` call renders in a fresh child process
+(``bg3dtools.render._child``): Open3D's headless renderer does not survive many renderers in one process
+(it segfaults, or returns black frames), and a native crash in the child costs that one call
+(``RenderChildDied``), not the caller. macOS renders in-process, as before (the legacy tier).
 
 ``render_mesh_to_image`` (bg3dtools.render.o3d) is a thin wrapper over ``render_frame``, so the two
 render engines that used to exist in parallel are now one implementation. humanfit.utils.render is a
@@ -127,11 +134,38 @@ class Lines:
     color: Tuple[float, float, float] = (0.7, 0.7, 0.7)
 
 
+# The arrays that rebuild each open3d geometry a _RawGeom carries across a process boundary.
+_O3D_ARRAYS = {
+    'TriangleMesh': ('vertices', 'triangles', 'vertex_normals', 'vertex_colors', 'triangle_normals'),
+    'PointCloud': ('points', 'normals', 'colors'),
+    'LineSet': ('points', 'lines', 'colors'),
+}
+
+
 @dataclass
 class _RawGeom:
-    """Passthrough for an ALREADY-built open3d geometry (used by render_mesh_to_image's compat wrapper)."""
+    """Passthrough for an ALREADY-built open3d geometry (used by render_mesh_to_image's compat wrapper).
+
+    Picklable, so it reaches a render child: open3d geometries are not, so the pickle carries the
+    geometry's arrays (``_O3D_ARRAYS``) and rebuilds it on load."""
     geom: object                  # an o3d TriangleMesh / PointCloud / LineSet
     hint: str = "mesh"            # material hint: "mesh" / "point" / "line"
+
+    def __getstate__(self):
+        kind = type(self.geom).__name__
+        if kind not in _O3D_ARRAYS:
+            raise TypeError(f"_RawGeom: an open3d {kind} cannot be pickled (supported: {sorted(_O3D_ARRAYS)})")
+        return {'hint': self.hint, 'kind': kind,
+                'arrays': {name: np.asarray(getattr(self.geom, name)) for name in _O3D_ARRAYS[kind]}}
+
+    def __setstate__(self, state):
+        import open3d as o3d
+        vector = {'triangles': o3d.utility.Vector3iVector, 'lines': o3d.utility.Vector2iVector}
+        geom = getattr(o3d.geometry, state['kind'])()
+        for name, values in state['arrays'].items():
+            if len(values):
+                setattr(geom, name, vector.get(name, o3d.utility.Vector3dVector)(values))
+        self.geom, self.hint = geom, state['hint']
 
 
 # A frame is a list of geometry specs.
@@ -950,6 +984,31 @@ def _offscreen_crash_probe_ok() -> bool:
 _dead_backends: set = set()
 
 
+def _blank(frames, images) -> bool:
+    """True when the scene draws something (a frame holds a spec) but every image is one flat colour.
+
+    A renderer that has stopped working returns such images without raising (all black, on SAR-PC's
+    headless Open3D). A scene whose geometry is all out of view also draws nothing; it is reported the
+    same way, which costs nothing (that picture shows nothing either)."""
+    if not any(frames):
+        return False
+    return all(np.ptp(np.asarray(im)[..., :3]) == 0 for im in images)
+
+
+def _in_render_child(fn, *args):
+    """``fn(*args)`` in a fresh render child off macOS (``bg3dtools.render._child``), here on macOS."""
+    if sys.platform == 'darwin':
+        return fn(*args)
+    from ._child import run_in_child
+    return run_in_child(fn, *args)
+
+
+def _render_video(frames, camera: CameraParams, options: RenderOptions, suffix: str) -> str:
+    """Render *frames* and encode them to a new local temporary file; returns its path."""
+    from bg3dtools.image_tools.video import encode_video
+    return encode_video(_render_to_images(frames, camera, options), options.fps, suffix=suffix)
+
+
 def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> List[np.ndarray]:
     """Backend dispatch (the single chokepoint). Tiers, first that works wins:
     offscreen → legacy → matplotlib → RenderUnavailable (macOS starts at legacy).
@@ -959,7 +1018,8 @@ def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> L
     diagnostic image. Only if matplotlib is ALSO unavailable do we raise RenderUnavailable, letting
     callers skip images and still produce their data outputs instead of aborting the run.
 
-    A backend that fails once is recorded in ``_dead_backends`` and skipped for the rest of the
+    A backend that returns only blank images (``_blank``) has failed like one that raises. A backend
+    that fails once is recorded in ``_dead_backends`` and skipped for the rest of the
     process, so a dead Open3D backend prints its native error — and this function logs its fallback
     warning — at most once per process rather than on every frame.
 
@@ -983,6 +1043,10 @@ def _render_to_images(frames, camera: CameraParams, options: RenderOptions) -> L
             log.debug("render backend %s unavailable: %s", backend.__name__, exc)
             errors.append("%s: %s" % (backend.__name__, exc))
             _dead_backends.add(backend.__name__)                         # never re-probe → no repeated native stderr noise
+            continue
+        if _blank(frames, images):                                       # drew nothing: a renderer that stopped drawing
+            errors.append("%s: returned only blank images" % backend.__name__)
+            _dead_backends.add(backend.__name__)
             continue
         if errors:                                                       # a preferred backend failed *this call* → name the tier that ran
             log.warning("render fell back to %s after: %s", backend.__name__, "; ".join(errors))
@@ -1010,19 +1074,20 @@ def render_scan(
 
     Backward compatible: the ``width/height/fps/bg_color`` kwargs work exactly as before. Pass a single
     ``options=RenderOptions(...)`` instead to control style (point_size/line_width/bg) in one object.
+
+    Off macOS the frames are rendered and encoded in a fresh child process (module docstring); a child
+    that crashes raises ``RenderChildDied`` and writes no video.
     """
-    from bg3dtools.image_tools.video import encode_video
     from bg3dtools.utils.background_io import deliver
     if options is None:
         options = RenderOptions(width=width, height=height, fps=fps,
                                 style=RenderStyle(bg_color=bg_color))
-    images = _render_to_images(frames, camera, options)
 
     # The house CIFS pattern (as image_tools.video.save_video): encode to a LOCAL temp file, then
     # deliver it (delete-first, retried copy; inside a background_io block on its writer thread).
-    # Rendering stays on the calling thread: Open3D's renderers are not for other threads.
+    # Rendering stays on the calling thread (or its child): Open3D's renderers are not for other threads.
     suffix = os.path.splitext(str(vis_file))[1] or '.mp4'
-    deliver(encode_video(images, options.fps, suffix=suffix), vis_file)
+    deliver(_in_render_child(_render_video, frames, camera, options, suffix), vis_file)
 
 
 def render_frame(
@@ -1035,7 +1100,7 @@ def render_frame(
     style: Optional[RenderStyle] = None,
 ) -> np.ndarray:
     """Render ONE frame (a list of geometry specs) to an (H,W,3/4) uint8 image — same backend core as
-    render_scan. ``render_mesh_to_image`` wraps this."""
+    render_scan, and like it in a fresh child process off macOS. ``render_mesh_to_image`` wraps this."""
     options = RenderOptions(width=width, height=height,
                             style=style or RenderStyle(bg_color=bg_color))
-    return _render_to_images([specs], camera, options)[0]
+    return _in_render_child(_render_to_images, [specs], camera, options)[0]

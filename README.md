@@ -88,6 +88,13 @@ R = twist_to_R(twist)            # [..., 3]    -> [..., 3, 3]
 T = make_aff(twist, trans)       # [..., 3], [..., 3] -> [..., 4, 4]
 ```
 
+## Headless rendering (Linux)
+
+Off macOS, `render_scan` and `render_frame` render each call in a fresh child process: Open3D's headless
+renderer segfaults or returns black frames once one process has built many renderers. A crash costs that one
+call (`RenderChildDied`); a renderer that returns only flat images is treated as failed and the next tier
+(matplotlib) renders instead. See `CLAUDE.md` ("Headless Open3D").
+
 ## macOS + Open3D
 
 Open3D's `Visualizer` accumulates Cocoa/OpenGL handles across repeated create/destroy cycles and eventually deadlocks the process. For batch rendering, run each call in a spawned subprocess:
