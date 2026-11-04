@@ -90,10 +90,9 @@ T = make_aff(twist, trans)       # [..., 3], [..., 3] -> [..., 4, 4]
 
 ## Headless rendering (Linux)
 
-Off macOS, `render_scan` and `render_frame` render each call in a fresh child process: Open3D's headless
-renderer has segfaulted, and has silently gone on returning black frames, partway through a long process (cause
-not found). A crash costs that one call (`RenderChildDied`); a renderer that returns only flat images is treated
-as failed and the next tier (matplotlib) renders instead. See `CLAUDE.md` ("Headless Open3D").
+A renderer that returns only flat images for a scene that draws something is treated as failed: the next tier
+(matplotlib) renders instead, with a warning, so a headless Open3D that silently stops drawing never yields a
+black video. See `CLAUDE.md` ("Headless Open3D: black frames").
 
 ## macOS + Open3D
 

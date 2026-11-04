@@ -150,7 +150,7 @@ from bg3dtools.pytorch import TorchBackend, infer_backend  # if torch installed
 | `pose_landmarking/` | MediaPipe pose detection, joint mapping, segmentation |
 | `image_tools/` | Image packing, filters, video I/O |
 | `iphone/` | iOS depth scanning data I/O (Stray Scanner & Record3D) |
-| `render/` | Colors/colormaps; visualization via `render.trimesh` or `render.o3d`; the unified renderer `render.scan` (`render_scan` / `render_frame`, each call in a fresh child process off macOS: `render._child`); `run_isolated()` subprocess wrapper |
+| `render/` | Colors/colormaps; visualization via `render.trimesh` or `render.o3d`; `run_isolated()` subprocess wrapper |
 | `utils/` | Timing, algorithms (FPS, PCA), filesystem, stats |
 | `utils/cifs_wrappers/` | Network filesystem I/O with exponential backoff retry |
 | `utils/background_io.py` | Write-behind and read-ahead for network-drive work: `background_io()` block (ONE writer thread, jobs run first-in first-out, a failure stops it and reaches the submitter unchanged, jobs deep-copied at submit, bounded queue), `writer()` (immediate outside a block), `prefetch()` (ordered read-ahead), `deliver()` (delete-first copy of a locally encoded file; every video writer ends with it) |
@@ -235,27 +235,22 @@ Where a module wraps an igl function under the *same* name (`mesh.laplace.gaussi
 unaliased import binds a name the module's own `def` overwrites, so the wrapper ends up
 calling itself. A test enforces this across both packages.
 
-## Headless Open3D: each render call in its own process
+## Headless Open3D: black frames
 
-Open3D's headless `OffscreenRenderer` (EGL/Filament) failed in two ways on SAR-PC (open3d 0.19, RTX 3090,
-2026-11-03/04):
+On SAR-PC (open3d 0.19, EGL headless, RTX 3090, 2026-11-03) two seated registrations each went on writing every
+3D video all black, without raising, from partway through (one after 89 3D videos, the other after 107) to the end
+of the process; the 2-D videos the same processes wrote stayed normal. The cause was not found. Ruled out: GPU
+memory (a renderer draws with 0.1 GB free), the number of renderers (200 in one process, under the registration's
+imports, all drew), the scene that first came out black (re-rendered in a fresh process, it drew), and NaN, inf or
+empty geometry or a NaN camera (none breaks a later renderer).
 
-- **Silent black frames.** Two seated registrations each went on writing every 3D video all black, without
-  raising, from partway through (one after 89 3D videos, the other after 107) to the end of the process; the 2-D
-  videos the same processes wrote stayed normal. The cause was not found. Ruled out: GPU memory (a renderer draws
-  with 0.1 GB free), the number of renderers (200 in one process, under the registration's imports, all drew), the
-  scene that first came out black (re-rendered in a fresh process, it drew), and NaN, inf or empty geometry or a
-  NaN camera (none breaks a later renderer).
-- **Segfaults.** A process that builds several renderers can segfault: on its first video in a process that had
-  imported only `render.scan`, after a few once `bg3dtools.mesh` was imported first, and in 4 of 12 fresh children
-  of a soak. The registrations themselves never crashed.
+So `render.scan._render_to_images` treats a tier that returns only flat images, for a scene that draws something,
+as failed (`_blank`): it is marked dead for the process and the next tier renders, with the fallback warning.
+After such a failure the rest of that process renders with matplotlib, cruder but never black.
 
-Neither is prevented; both are contained. Off macOS `render_scan` and `render_frame` render each call in a fresh
-child process (`bg3dtools.render._child.run_in_child`: a plain subprocess, the job and result as pickle files, the
-child's warnings re-emitted in the parent), so a renderer that went bad ends with its call, and a crash raises
-`RenderChildDied` for that call only. A tier that returns only flat images for a scene with geometry has failed,
-and the next tier renders instead, so a silent failure never yields a black video. The child imports
-`bg3dtools.mesh` before it renders (the import order that crashed least above).
+Separately, test scripts that built several offscreen renderers in one process segfaulted (on the first video when
+only `render.scan` was imported before rendering; after a few when `bg3dtools.mesh` was imported first), and even
+fresh processes sometimes did. Not seen in a registration, not root-caused.
 
 ## macOS Open3D Rendering Caveat
 
