@@ -1,8 +1,9 @@
 """Render calls in a fresh child process (``bg3dtools.render._child``) and the blank-output guard.
 
-Open3D's headless renderer does not survive many renderers in one process (SAR-PC, 2026-11-04: a
-segfault after a few, or black frames after many), so off macOS every ``render_scan`` / ``render_frame``
-renders in a child that exits after its one call, and a tier that returns only flat images has failed.
+Open3D's headless renderer has segfaulted, and has silently gone on returning black frames, partway
+through long processes (SAR-PC, 2026-11-03/04, causes not found), so off macOS every ``render_scan`` /
+``render_frame`` renders in a child that exits after its one call, and a tier that returns only flat
+images has failed.
 
 The protocol tests run real children on stdlib callables (a value, an exception, a real native crash,
 a logged warning); the routing tests replace the child with an in-process stand-in; one test renders

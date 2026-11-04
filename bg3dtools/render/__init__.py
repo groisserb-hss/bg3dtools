@@ -88,9 +88,8 @@ __all__.extend([
 from .scan import (  # noqa: E402
     Wireframe, PointCloudSpec, Skeleton, Floor, CameraFrustum, Mesh, Lines, _RawGeom,
     GeometrySpec, CameraParams, RenderStyle, RenderOptions, render_scan, render_frame,
-    RenderUnavailable,
+    RenderUnavailable, RenderChildDied,
 )
-from ._child import RenderChildDied  # noqa: E402
 __all__.extend([
     "Wireframe", "PointCloudSpec", "Skeleton", "Floor", "CameraFrustum", "Mesh", "Lines",
     "GeometrySpec", "CameraParams", "RenderStyle", "RenderOptions", "render_scan", "render_frame",

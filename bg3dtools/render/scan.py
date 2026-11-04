@@ -22,9 +22,10 @@ only blank images (every one a single flat colour) for a scene that draws someth
 next tier renders instead, so a renderer that silently stopped drawing never yields a black video.
 
 Off macOS every ``render_scan`` / ``render_frame`` call renders in a fresh child process
-(``bg3dtools.render._child``): Open3D's headless renderer does not survive many renderers in one process
-(it segfaults, or returns black frames), and a native crash in the child costs that one call
-(``RenderChildDied``), not the caller. macOS renders in-process, as before (the legacy tier).
+(``bg3dtools.render._child``): Open3D's headless renderer has segfaulted, and has silently gone on returning
+black frames, partway through a long process (``bg3dtools`` CLAUDE.md, "Headless Open3D"). In a child, a renderer
+that went bad ends with its call, and a native crash costs that one call (``RenderChildDied``), not the caller.
+macOS renders in-process, as before (the legacy tier).
 
 ``render_mesh_to_image`` (bg3dtools.render.o3d) is a thin wrapper over ``render_frame``, so the two
 render engines that used to exist in parallel are now one implementation. humanfit.utils.render is a
@@ -63,6 +64,10 @@ class RenderUnavailable(RuntimeError):
     image output: the pipeline's data products (CSVs, meshes, gate files) are
     written independently of figures.
     """
+
+
+class RenderChildDied(RuntimeError):
+    """The render child exited without a result: a native crash (exit -11 is a segfault) or a kill."""
 
 
 # ---------------------------------------------------------------------------

@@ -1,19 +1,22 @@
 """Run one render call in a fresh Python process: ``run_in_child(fn, *args)`` in the parent,
 ``python -m bg3dtools.render._child JOB RESULT`` in the child.
 
-Why a fresh process per call: Open3D's headless ``OffscreenRenderer`` does not survive many renderers in
-one process. On SAR-PC (open3d 0.19, EGL headless, 2026-11-04) a process segfaulted in ``add_geometry``
-once it had built four or five renderers, and a seated registration run that built one per video went on
-silently returning black frames after about a hundred; one renderer in a fresh process rendered every frame
-(280 of 280) every time. Every renderer this package builds therefore lives in a child that exits after
-its one call (``scan._in_render_child``), and a native crash there costs that call, not the caller.
+Why a fresh process per call: Open3D's headless ``OffscreenRenderer`` failed partway through long processes on
+SAR-PC (open3d 0.19, 2026-11-03/04) in two ways whose causes were not found: two seated registrations silently
+went on writing black frames from one video on, and processes that built several renderers segfaulted
+(``bg3dtools`` CLAUDE.md, "Headless Open3D", lists what was ruled out). In a child that exits after its one call
+(``scan._in_render_child``), a renderer that went bad takes only that call with it, and a native crash costs that
+call, not the caller.
 
 A plain ``subprocess`` rather than ``multiprocessing``: the child's import order is this module's, not a
 re-import of the caller's ``__main__`` (which ``spawn`` does), and it matters. On SAR-PC the renderer
 segfaulted on its first frame in a process that had imported only ``bg3dtools.render.scan`` before
-rendering, and rendered cleanly in one that had imported ``bg3dtools.mesh`` (open3d, torch, igl, scipy)
+rendering, and crashed far less in one that had imported ``bg3dtools.mesh`` (open3d, torch, igl, scipy)
 first, which is why the child imports it before anything renders. Which library's load order is the
 trigger was not isolated.
+
+``bg3dtools.render`` must not import this module: ``python -m`` would then find it already imported and
+warn (runpy). ``RenderChildDied`` lives in ``scan`` for that reason.
 
 The job and the result cross as pickle files in a private temporary directory (a frame list can be
 hundreds of MB, more than a pipe should buffer). The child sends back the call's value, or its
@@ -29,11 +32,9 @@ import sys
 import tempfile
 from pathlib import Path
 
+from bg3dtools.render.scan import RenderChildDied, _offscreen_crash_probe_ok  # numpy only: open3d loads later
+
 log = logging.getLogger(__name__)
-
-
-class RenderChildDied(RuntimeError):
-    """The render child exited without a result: a native crash (exit -11 is a segfault) or a kill."""
 
 
 def run_in_child(fn, *args):
@@ -68,7 +69,6 @@ class _Collect(logging.Handler):
 
 
 def _main(job, result):
-    from bg3dtools.render.scan import _offscreen_crash_probe_ok
     _offscreen_crash_probe_ok()          # first: an 'ok-surfaceless' host needs EGL_PLATFORM set before open3d loads
     import bg3dtools.mesh  # noqa: F401  (loads open3d; before anything renders: see the module docstring)
 

@@ -235,17 +235,27 @@ Where a module wraps an igl function under the *same* name (`mesh.laplace.gaussi
 unaliased import binds a name the module's own `def` overwrites, so the wrapper ends up
 calling itself. A test enforces this across both packages.
 
-## Headless Open3D: one renderer per process
+## Headless Open3D: each render call in its own process
 
-On Linux, Open3D's headless `OffscreenRenderer` (EGL) does not survive many renderers in one process: on
-SAR-PC (open3d 0.19, 2026-11-04) a process segfaulted in `add_geometry` after four or five, and a seated
-registration that built one per video went on returning black frames after about a hundred, without raising.
-So off macOS `render_scan` and `render_frame` render each call in a fresh child process
-(`bg3dtools.render._child.run_in_child`: a plain subprocess, the job and result as pickle files, the child's
-warnings re-emitted in the parent); a crash there raises `RenderChildDied` for that call only. A tier that
-returns only flat images for a scene with geometry has failed, and the next tier renders instead, so a
-renderer that stopped drawing never yields a black video. The child imports `bg3dtools.mesh` before it
-renders: on SAR-PC, rendering in a process that had imported only `render.scan` segfaulted on its first frame.
+Open3D's headless `OffscreenRenderer` (EGL/Filament) failed in two ways on SAR-PC (open3d 0.19, RTX 3090,
+2026-11-03/04):
+
+- **Silent black frames.** Two seated registrations each went on writing every 3D video all black, without
+  raising, from partway through (one after 89 3D videos, the other after 107) to the end of the process; the 2-D
+  videos the same processes wrote stayed normal. The cause was not found. Ruled out: GPU memory (a renderer draws
+  with 0.1 GB free), the number of renderers (200 in one process, under the registration's imports, all drew), the
+  scene that first came out black (re-rendered in a fresh process, it drew), and NaN, inf or empty geometry or a
+  NaN camera (none breaks a later renderer).
+- **Segfaults.** A process that builds several renderers can segfault: on its first video in a process that had
+  imported only `render.scan`, after a few once `bg3dtools.mesh` was imported first, and in 4 of 12 fresh children
+  of a soak. The registrations themselves never crashed.
+
+Neither is prevented; both are contained. Off macOS `render_scan` and `render_frame` render each call in a fresh
+child process (`bg3dtools.render._child.run_in_child`: a plain subprocess, the job and result as pickle files, the
+child's warnings re-emitted in the parent), so a renderer that went bad ends with its call, and a crash raises
+`RenderChildDied` for that call only. A tier that returns only flat images for a scene with geometry has failed,
+and the next tier renders instead, so a silent failure never yields a black video. The child imports
+`bg3dtools.mesh` before it renders (the import order that crashed least above).
 
 ## macOS Open3D Rendering Caveat
 
