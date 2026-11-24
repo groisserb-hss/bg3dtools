@@ -891,16 +891,26 @@ def barycentric_coordinates_tri(
 
     2.6: **RENAMED** to ``igl.barycentric_coordinates`` (the tri/tet distinction
     moved into the argument count). Values agree exactly and both are insensitive
-    to array storage order. 2.5.1 squeezes the result to ``(3,)`` when
-    ``nP == 1``; normalized here. Verified on both.
+    to array storage order. Verified on both.
+
+    **A single query never reaches igl as one row.** The pypi ``libigl`` 2.5.1
+    Linux x86_64 wheel (the HSS hosts) segfaulted on a one-point call with four
+    C-contiguous ``(1, 3)`` float64 arrays, after many-point calls in the same
+    process had returned (SAR-PC, 2026-11-24); the macOS wheel of that version
+    only squeezes the result to ``(3,)``. One point is therefore sent as the
+    same row twice and the second answer dropped, on every build, so that the
+    path taken does not depend on the platform. That this avoids the crash on
+    the Linux wheel is the reading of one traceback, to be confirmed there with
+    ``scripts/probe_igl_barycentric.py``.
     """
     if _barycentric_coordinates_tri is None:
         _missing("barycentric_coordinates_tri",
                  "barycentric_coordinates_tri", "barycentric_coordinates")
-    p, a, b, c = (_flt(x) for x in (p, a, b, c))
-    if p.ndim == 1:
-        p, a, b, c = p[None, :], a[None, :], b[None, :], c[None, :]
-    return _flt2d(_barycentric_coordinates_tri(p, a, b, c), 3)
+    p, a, b, c = (_flt(x).reshape(-1, np.shape(x)[-1]) for x in (p, a, b, c))
+    if p.shape[0] != 1:
+        return _flt2d(_barycentric_coordinates_tri(p, a, b, c), 3)
+    twice = (np.ascontiguousarray(np.repeat(x, 2, axis=0)) for x in (p, a, b, c))
+    return _flt2d(_barycentric_coordinates_tri(*twice), 3)[:1].copy()
 
 
 def point_simplex_squared_distance(

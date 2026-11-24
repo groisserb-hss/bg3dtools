@@ -619,6 +619,28 @@ def test_barycentric_coordinates_tri_single_point_stays_two_dimensional():
     assert bc[0] == pytest.approx([0.5, 0.25, 0.25])
 
 
+def test_barycentric_coordinates_tri_never_hands_igl_a_single_row(monkeypatch):
+    """The Linux pypi 2.5.1 wheel segfaulted on a one-row call (SAR-PC, 2026-11-24): one point goes in as the
+    same row twice, for a bare (3,) query as for a (1, 3) one, and the answer is the one row asked for."""
+    seen, real = [], ic._barycentric_coordinates_tri
+
+    def spy(p, a, b, c):
+        seen.append(tuple(x.shape for x in (p, a, b, c)))
+        assert all(x.flags["C_CONTIGUOUS"] and x.dtype == np.float64 for x in (p, a, b, c))
+        return real(p, a, b, c)
+
+    monkeypatch.setattr(ic, "_barycentric_coordinates_tri", spy)
+    tri = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]])
+    q = np.array([0.25, 0.25, 0.])
+    for query, corners in ((q, tri), (q[None], tri[:, None, :])):
+        bc = ic.barycentric_coordinates_tri(query, *corners)
+        assert_float(bc, (1, 3))
+        assert bc[0] == pytest.approx([0.5, 0.25, 0.25])
+    assert seen == [((2, 3),) * 4] * 2
+    many = ic.barycentric_coordinates_tri(np.tile(q, (4, 1)), *(np.tile(x, (4, 1)) for x in tri))
+    assert_float(many, (4, 3)) and seen[-1] == ((4, 3),) * 4
+
+
 def test_cotmatrix_and_intrinsic_delaunay_cotmatrix():
     import scipy.sparse as sp
     v, f = _icosahedron()
