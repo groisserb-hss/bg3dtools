@@ -11,14 +11,17 @@ fact; they were never written at release time.
 
 ### Changed
 
-- **`igl_compat.barycentric_coordinates_tri`** (2026-11-24) never hands igl a single
-  row: one query point is sent as the same row twice and the second answer dropped.
-  Added after the pypi `libigl` 2.5.1 Linux x86_64 wheel segfaulted inside this call on
-  SAR-PC, on a one-point query that followed a nearest-point query.
-  `scripts/probe_igl_barycentric.py` has since shown that one-row calls on numpy's own
-  arrays survive on that build: a single row is not the established trigger and the
-  padding is not a verified fix. `scripts/probe_igl_nearest_then_barycentric.py` replays
-  the crashing sequence one variation at a time to find the cause.
+- **`igl_compat`** (2026-11-24) hands igl only arrays with the strides of a freshly
+  allocated array. numpy flags an array contiguous whatever the stride of a length-1
+  axis, so `tri[:, 0]` of a `(1, 3, 3)` array, a `(1, 3)` view with strides `(72, 8)`,
+  passed `np.ascontiguousarray` untouched; the pypi `libigl` 2.5.1 Linux x86_64 wheel
+  segfaults in `barycentric_coordinates_tri` on such a view and returns normally for
+  the same values with strides `(24, 8)` (SAR-PC; the macOS wheel accepts both).
+  `_flt` / `_idx`, through which every wrapper passes its arrays, now copy exactly
+  those views. Found with `scripts/probe_igl_nearest_then_barycentric.py`, which runs
+  each variation of the crashing sequence in its own process. The one-point padding
+  added to `barycentric_coordinates_tri` earlier the same day is removed: it worked
+  only because it copied.
 - **`igl_compat.BROKEN`** (2026-11-01): wrappers whose igl symbol resolves but whose
   implementation in the installed build crashes the interpreter, keyed on the
   distribution and platform — the pypi `libigl` 2.5.1 Linux x86_64 wheel segfaults

@@ -12,6 +12,12 @@ on the first one-point call of this sequence, as SAR_annotations then ran it:
 numpy survives on that build. What differs in the sequence is that ``C`` comes back from
 igl. This probe replays the sequence and varies one thing at a time: which arrays are
 copies owned by numpy, how many points, what ran before, and whether igl is called at all.
+
+Result on SAR-PC, 2026-11-24: every case that hands igl the triangle's corners as
+``tri[:, k]`` of a ``(1, 3, 3)`` array dies, and the same case with the corners copied
+lives. Such a view has one row and a row stride of 72 bytes where a fresh ``(1, 3)`` array
+has 24; numpy flags both contiguous. ``igl_compat`` now copies such views (``_packed``),
+and the MINIMAL cases show the difference without a mesh.
 A segfault cannot be caught, so every case runs in its own interpreter and is reported by
 how that interpreter ended; a case that dies prints the last Python frames it was in.
 
@@ -167,8 +173,18 @@ CASES = {
     "  both copied first": "print(each_site(copy=('closest', 'corners')))",
     "  raw igl barycentric, no wrapper": "print(each_site(bary=lambda p, a, b, c: np.asarray(RAW_BARY(p, a, b, c)).reshape(-1, 3)))",
     "  raw igl nearest and barycentric": "print(each_site(nearest=igl.point_mesh_squared_distance, bary=lambda p, a, b, c: np.asarray(RAW_BARY(p, a, b, c)).reshape(-1, 3)))",
-    "  today's wrapper (1 point as 2 rows)": "print(each_site(bary=ic.barycentric_coordinates_tri))",
+    "  today's wrapper": "print(each_site(bary=ic.barycentric_coordinates_tri))",
     "  weights by arithmetic, no igl barycentric": "print(each_site(bary=numpy_bary))",
+    # the smallest case: no nearest-point query, no mesh; only the corners' row stride differs
+    "MINIMAL, raw igl: corners as tri[:, k] of a (1, 3, 3) array (row stride 72)":
+        "tri = np.array([[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]]]); q = np.array([[0.25, 0.25, 0.]])\n"
+        "print(tri[:, 0].strides, np.asarray(RAW_BARY(q, tri[:, 0], tri[:, 1], tri[:, 2])).ravel())",
+    "MINIMAL, raw igl: the same corners copied (row stride 24)":
+        "tri = np.array([[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]]]); q = np.array([[0.25, 0.25, 0.]])\n"
+        "print(tri[:, 0].copy().strides, np.asarray(RAW_BARY(q, tri[:, 0].copy(), tri[:, 1].copy(), tri[:, 2].copy())).ravel())",
+    "MINIMAL, today's wrapper: corners as tri[:, k] of a (1, 3, 3) array":
+        "tri = np.array([[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]]]); q = np.array([[0.25, 0.25, 0.]])\n"
+        "print(ic.barycentric_coordinates_tri(q, tri[:, 0], tri[:, 1], tri[:, 2]).ravel())",
     # how many points, and what ran before
     "all sites in one call, old wrapper": "print('worst rebuild error %.2g' % max(sequence(SITES) for _ in range(REPEAT)))",
     "2 points per call, old wrapper": "print('worst rebuild error %.2g' % max(sequence(SITES[i:i + 2]) for _ in range(REPEAT) for i in range(len(SITES) - 1)))",
