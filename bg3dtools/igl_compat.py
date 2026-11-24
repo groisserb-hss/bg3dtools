@@ -288,14 +288,28 @@ MASSMATRIX_TYPE_FULL = getattr(igl, "MASSMATRIX_TYPE_FULL", 2)
 # dtype / shape normalizers
 # ---------------------------------------------------------------------------
 
+def _packed(a: np.ndarray) -> np.ndarray:
+    """*a* (C-contiguous) with the strides of a freshly allocated array of its shape, copied only if they differ.
+
+    numpy flags an array C-contiguous whatever the stride of an axis of length 1, since that stride is never
+    stepped: ``tri[:, 0]`` of a ``(1, 3, 3)`` array is a ``(1, 3)`` view with strides ``(72, 8)``, flagged C- and
+    F-contiguous, and ``np.ascontiguousarray`` hands it back untouched. The pypi libigl 2.5.1 Linux x86_64 wheel
+    segfaults in ``barycentric_coordinates_tri`` when given such a view and returns normally for the same values
+    in an array with strides ``(24, 8)`` (SAR-PC, 2026-11-24, ``scripts/probe_igl_nearest_then_barycentric.py``);
+    the macOS wheel accepts both. No binding is trusted with them.
+    """
+    packed = tuple(int(a.itemsize * np.prod(a.shape[i + 1:], dtype=np.int64)) for i in range(a.ndim))
+    return a if a.strides == packed else a.copy(order="C")
+
+
 def _idx(a) -> np.ndarray:
-    """C-contiguous int64 view of an index/label array."""
-    return np.ascontiguousarray(a, dtype=np.int64)
+    """C-contiguous int64 view of an index/label array, with the strides of a fresh array (:func:`_packed`)."""
+    return _packed(np.ascontiguousarray(a, dtype=np.int64))
 
 
 def _flt(a) -> np.ndarray:
-    """C-contiguous float64 view of a coordinate/scalar array."""
-    return np.ascontiguousarray(a, dtype=np.float64)
+    """C-contiguous float64 view of a coordinate/scalar array, with the strides of a fresh array (:func:`_packed`)."""
+    return _packed(np.ascontiguousarray(a, dtype=np.float64))
 
 
 def _idx2d(a, ncols: int) -> np.ndarray:
@@ -892,25 +906,21 @@ def barycentric_coordinates_tri(
     2.6: **RENAMED** to ``igl.barycentric_coordinates`` (the tri/tet distinction
     moved into the argument count). Values agree exactly and both are insensitive
     to array storage order. Verified on both.
+    2.5.1 squeezes the result to ``(3,)`` when ``nP == 1``; normalized here.
 
-    **A single query never reaches igl as one row.** The pypi ``libigl`` 2.5.1
-    Linux x86_64 wheel (the HSS hosts) segfaulted on a one-point call with four
-    C-contiguous ``(1, 3)`` float64 arrays, after many-point calls in the same
-    process had returned (SAR-PC, 2026-11-24); the macOS wheel of that version
-    only squeezes the result to ``(3,)``. One point is therefore sent as the
-    same row twice and the second answer dropped, on every build, so that the
-    path taken does not depend on the platform. That this avoids the crash on
-    the Linux wheel is the reading of one traceback, to be confirmed there with
-    ``scripts/probe_igl_barycentric.py``.
+    The pypi ``libigl`` 2.5.1 Linux x86_64 wheel (the HSS hosts) segfaults here
+    when an argument is a one-row view with a non-standard row stride, which is
+    what ``tri[:, k]`` of a ``(1, 3, 3)`` array is; :func:`_packed` (through
+    ``_flt``) keeps such views from reaching igl. One point as such is harmless
+    on that build.
     """
     if _barycentric_coordinates_tri is None:
         _missing("barycentric_coordinates_tri",
                  "barycentric_coordinates_tri", "barycentric_coordinates")
-    p, a, b, c = (_flt(x).reshape(-1, np.shape(x)[-1]) for x in (p, a, b, c))
-    if p.shape[0] != 1:
-        return _flt2d(_barycentric_coordinates_tri(p, a, b, c), 3)
-    twice = (np.ascontiguousarray(np.repeat(x, 2, axis=0)) for x in (p, a, b, c))
-    return _flt2d(_barycentric_coordinates_tri(*twice), 3)[:1].copy()
+    p, a, b, c = (_flt(x) for x in (p, a, b, c))
+    if p.ndim == 1:
+        p, a, b, c = p[None, :], a[None, :], b[None, :], c[None, :]
+    return _flt2d(_barycentric_coordinates_tri(p, a, b, c), 3)
 
 
 def point_simplex_squared_distance(

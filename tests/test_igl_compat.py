@@ -619,26 +619,35 @@ def test_barycentric_coordinates_tri_single_point_stays_two_dimensional():
     assert bc[0] == pytest.approx([0.5, 0.25, 0.25])
 
 
-def test_barycentric_coordinates_tri_never_hands_igl_a_single_row(monkeypatch):
-    """The Linux pypi 2.5.1 wheel segfaulted on a one-row call (SAR-PC, 2026-11-24): one point goes in as the
-    same row twice, for a bare (3,) query as for a (1, 3) one, and the answer is the one row asked for."""
+def test_arrays_reach_igl_with_the_strides_of_a_fresh_array():
+    """A one-row view keeps its parent's row stride and is still flagged contiguous; the Linux pypi 2.5.1 wheel
+    segfaults on one (SAR-PC, 2026-11-24). ``_flt`` / ``_idx`` copy exactly those and nothing else."""
+    tri = np.arange(9.0).reshape(1, 3, 3)
+    view = tri[:, 1]
+    assert view.flags["C_CONTIGUOUS"] and view.strides == (72, 8)          # what ascontiguousarray lets through
+    out = ic._flt(view)
+    assert out.strides == (24, 8) and not np.shares_memory(out, tri) and (out == [[3., 4., 5.]]).all()
+    faces = np.arange(6, dtype=np.int64).reshape(1, 2, 3)
+    assert ic._idx(faces[:, 1]).strides == (24, 8)
+    plain = np.zeros((4, 3))
+    assert ic._flt(plain) is plain and np.shares_memory(ic._flt(plain[1:2]), plain)      # no copy where none is due
+    assert ic._flt(np.zeros((0, 3))).shape == (0, 3) and ic._flt(2.0).tolist() == [2.0]      # empty and scalar inputs
+
+
+def test_barycentric_coordinates_tri_of_one_point_from_a_triangle_stack(monkeypatch):
+    """The call that crashed: one point against ``tri[:, k]`` of a (1, 3, 3) stack."""
     seen, real = [], ic._barycentric_coordinates_tri
 
     def spy(p, a, b, c):
-        seen.append(tuple(x.shape for x in (p, a, b, c)))
-        assert all(x.flags["C_CONTIGUOUS"] and x.dtype == np.float64 for x in (p, a, b, c))
+        seen.append([x.strides for x in (p, a, b, c)])
         return real(p, a, b, c)
 
     monkeypatch.setattr(ic, "_barycentric_coordinates_tri", spy)
-    tri = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]])
-    q = np.array([0.25, 0.25, 0.])
-    for query, corners in ((q, tri), (q[None], tri[:, None, :])):
-        bc = ic.barycentric_coordinates_tri(query, *corners)
-        assert_float(bc, (1, 3))
-        assert bc[0] == pytest.approx([0.5, 0.25, 0.25])
-    assert seen == [((2, 3),) * 4] * 2
-    many = ic.barycentric_coordinates_tri(np.tile(q, (4, 1)), *(np.tile(x, (4, 1)) for x in tri))
-    assert_float(many, (4, 3)) and seen[-1] == ((4, 3),) * 4
+    tri = np.array([[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]]])
+    bc = ic.barycentric_coordinates_tri(np.array([[0.25, 0.25, 0.]]), tri[:, 0], tri[:, 1], tri[:, 2])
+    assert_float(bc, (1, 3))
+    assert bc[0] == pytest.approx([0.5, 0.25, 0.25])
+    assert seen == [[(24, 8)] * 4]
 
 
 def test_cotmatrix_and_intrinsic_delaunay_cotmatrix():
