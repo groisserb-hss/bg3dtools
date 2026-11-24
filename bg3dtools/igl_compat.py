@@ -893,15 +893,14 @@ def barycentric_coordinates_tri(
     moved into the argument count). Values agree exactly and both are insensitive
     to array storage order. Verified on both.
 
-    **A single query never reaches igl as one row.** The pypi ``libigl`` 2.5.1
-    Linux x86_64 wheel (the HSS hosts) segfaulted on a one-point call with four
-    C-contiguous ``(1, 3)`` float64 arrays, after many-point calls in the same
-    process had returned (SAR-PC, 2026-11-24); the macOS wheel of that version
-    only squeezes the result to ``(3,)``. One point is therefore sent as the
-    same row twice and the second answer dropped, on every build, so that the
-    path taken does not depend on the platform. That this avoids the crash on
-    the Linux wheel is the reading of one traceback, to be confirmed there with
-    ``scripts/probe_igl_barycentric.py``.
+    **A single query never reaches igl as one row**: one point is sent as the
+    same row twice and the second answer dropped, on every build. This was added
+    2026-11-24 after the pypi ``libigl`` 2.5.1 Linux x86_64 wheel (the HSS hosts)
+    segfaulted inside this call on a one-point query that followed a nearest-point
+    query. ``scripts/probe_igl_barycentric.py`` then showed that one-row calls on
+    numpy's own arrays survive on that build, so a single row is NOT the
+    established trigger and the padding is not a verified fix; the cause is being
+    looked for with ``scripts/probe_igl_nearest_then_barycentric.py``.
     """
     if _barycentric_coordinates_tri is None:
         _missing("barycentric_coordinates_tri",
